@@ -1,0 +1,17 @@
+{
+  "name": "vox",
+  "version": "0.1.0",
+  "description": "Voice AI orchestration bar",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "spike": "electron spike.js"
+  },
+  "dependencies": {},
+  "allowScripts": {
+    "electron@36.9.5": true
+  },
+  "devDependencies": {
+    "electron": "^36.9.5"
+  }
+}

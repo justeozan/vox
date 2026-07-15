@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: transparent;
+    overflow: hidden;
+    user-select: none;
+    -webkit-app-region: drag;
+  }
+
+  .bar {
+    width: 480px;
+    height: 56px;
+    background: rgba(12, 12, 14, 0.92);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 28px;
+    display: flex;
+    align-items: center;
+    padding: 0 18px;
+    gap: 12px;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+  }
+
+  /* State dot */
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: #2a2a2e;
+    transition: background 0.2s, box-shadow 0.2s;
+  }
+  body.listening .dot  { background: #4ade80; box-shadow: 0 0 8px #4ade8066; }
+  body.thinking .dot   { background: #f59e0b; box-shadow: 0 0 8px #f59e0b66; }
+  body.speaking .dot   { background: #60a5fa; box-shadow: 0 0 8px #60a5fa66; }
+  body.running .dot    { background: #a78bfa; box-shadow: 0 0 8px #a78bfa66; }
+
+  /* Waveform */
+  .waveform {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex: 1;
+    height: 28px;
+  }
+  .waveform span {
+    display: block;
+    width: 3px;
+    border-radius: 2px;
+    background: rgba(255,255,255,0.08);
+    transition: height 0.12s ease, background 0.2s;
+    height: 4px;
+  }
+
+  body.listening .waveform span  { background: rgba(74,222,128,0.6); }
+  body.thinking .waveform span   { background: rgba(245,158,11,0.4); }
+  body.speaking .waveform span   { background: rgba(96,165,250,0.6); }
+  body.running .waveform span    { background: rgba(167,139,250,0.3); }
+
+  /* Label */
+  .label {
+    font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: rgba(255,255,255,0.18);
+    flex-shrink: 0;
+    min-width: 80px;
+    text-align: right;
+    transition: color 0.2s;
+  }
+  body.listening .label { color: rgba(74,222,128,0.6); }
+  body.thinking .label  { color: rgba(245,158,11,0.5); }
+  body.speaking .label  { color: rgba(96,165,250,0.6); }
+  body.running .label   { color: rgba(167,139,250,0.7); }
+
+  /* Agent badge */
+  .badge {
+    display: none;
+    background: rgba(167,139,250,0.15);
+    border: 1px solid rgba(167,139,250,0.3);
+    color: #a78bfa;
+    font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+    letter-spacing: 0.06em;
+    flex-shrink: 0;
+  }
+  body.running .badge { display: block; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <div class="dot"></div>
+  <div class="waveform" id="waveform"></div>
+  <div class="label" id="label">⌥ space</div>
+  <div class="badge" id="badge">0 agents</div>
+</div>
+
+<script>
+// ── State machine ─────────────────────────────────────────────────────────────
+let state = 'idle'
+let agentCount = 0
+
+function setState(s) {
+  state = s
+  document.body.className = s
+  const labels = {
+    idle:     '⌥ space',
+    listening: 'enregistre…',
+    thinking:  'réflexion…',
+    speaking:  'réponse…',
+    running:   'agents actifs',
+  }
+  document.getElementById('label').textContent = labels[s] || ''
+  animateWaveform(s)
+}
+
+// ── Waveform animation ────────────────────────────────────────────────────────
+const waveEl = document.getElementById('waveform')
+const BAR_COUNT = 16
+for (let i = 0; i < BAR_COUNT; i++) waveEl.appendChild(document.createElement('span'))
+const bars = waveEl.querySelectorAll('span')
+
+let rafId
+function animateWaveform(s) {
+  cancelAnimationFrame(rafId)
+  bars.forEach(b => b.style.height = '4px')
+  if (s === 'idle') return
+
+  function tick() {
+    bars.forEach((b, i) => {
+      let h = 4
+      if (s === 'listening') {
+        h = 6 + Math.abs(Math.sin(Date.now() / 120 + i * 0.7)) * 22
+      } else if (s === 'thinking') {
+        const phase = (Date.now() / 300 + i * 0.5) % (BAR_COUNT * 0.5)
+        h = 4 + Math.max(0, 20 - Math.abs(phase - BAR_COUNT * 0.25) * 3)
+      } else if (s === 'speaking') {
+        h = 6 + Math.abs(Math.sin(Date.now() / 100 + i * 0.9)) * 18
+      } else if (s === 'running') {
+        h = i % 4 === 0 ? 4 + Math.abs(Math.sin(Date.now() / 600 + i)) * 8 : 4
+      }
+      b.style.height = h.toFixed(1) + 'px'
+    })
+    rafId = requestAnimationFrame(tick)
+  }
+  rafId = requestAnimationFrame(tick)
+}
+
+// ── Audio recording: AudioContext → PCM → WAV (no ffmpeg needed) ─────────────
+let audioCtx = null
+let audioStream = null
+let recProcessor = null
+let recSource = null
+let pcmChunks = []
+let isRecording = false
+
+async function startRecording() {
+  try {
+    audioStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    // 16kHz mono — whisper's preferred input rate
+    audioCtx = new AudioContext({ sampleRate: 16000 })
+    recSource = audioCtx.createMediaStreamSource(audioStream)
+    recProcessor = audioCtx.createScriptProcessor(4096, 1, 1)
+    pcmChunks = []
+    recProcessor.onaudioprocess = (e) => {
+      pcmChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)))
+    }
+    recSource.connect(recProcessor)
+    recProcessor.connect(audioCtx.destination)
+    isRecording = true
+    setState('listening')
+  } catch (err) {
+    console.error('[vox] startRecording failed:', err.message)
+  }
+}
+
+function stopRecording() {
+  if (!isRecording) return null
+  isRecording = false
+  recSource.disconnect()
+  recProcessor.disconnect()
+  audioStream.getTracks().forEach(t => t.stop())
+  const sampleRate = audioCtx.sampleRate
+  audioCtx.close()
+
+  // Merge PCM chunks
+  const total = pcmChunks.reduce((n, c) => n + c.length, 0)
+  const pcm = new Float32Array(total)
+  let offset = 0
+  for (const c of pcmChunks) { pcm.set(c, offset); offset += c.length }
+
+  return encodeWAV(pcm, sampleRate)
+}
+
+// Encode float32 PCM samples to WAV ArrayBuffer (no dependencies)
+function encodeWAV(samples, sampleRate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2)
+  const view = new DataView(buf)
+  const str = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)) }
+  str(0, 'RIFF'); view.setUint32(4, 36 + samples.length * 2, true)
+  str(8, 'WAVE'); str(12, 'fmt ')
+  view.setUint32(16, 16, true)        // chunk size
+  view.setUint16(20, 1, true)         // PCM
+  view.setUint16(22, 1, true)         // mono
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * 2, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)        // 16-bit
+  str(36, 'data'); view.setUint32(40, samples.length * 2, true)
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]))
+    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true)
+  }
+  return buf
+}
+
+// ── Toggle: ⌥Space starts recording, ⌥Space again stops & sends ──────────────
+async function toggleListening() {
+  if (isRecording) {
+    setState('thinking')
+    const ab = stopRecording()
+    if (ab && ab.byteLength > 1000) {
+      window.vox.sendAudio(ab)
+    } else {
+      setState(agentCount > 0 ? 'running' : 'idle')
+    }
+  } else if (state === 'idle' || state === 'running') {
+    startRecording()
+  }
+}
+
+// ── IPC from main ─────────────────────────────────────────────────────────────
+window.vox.onToggleListen(toggleListening)
+window.vox.onSpeakingStart(() => setState('speaking'))
+window.vox.onSpeakingDone(() => setState(agentCount > 0 ? 'running' : 'idle'))
+
+window.vox.onAgentStatus(({ count }) => {
+  agentCount = count
+  document.getElementById('badge').textContent = count + (count === 1 ? ' agent' : ' agents')
+  if (state !== 'listening' && state !== 'thinking' && state !== 'speaking') {
+    setState(count > 0 ? 'running' : 'idle')
+  }
+})
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+// Warm up microphone permission (getUserMedia triggers TCC dialog on macOS)
+navigator.mediaDevices.getUserMedia({ audio: true })
+  .then(stream => { stream.getTracks().forEach(t => t.stop()); console.log('[vox] mic ok') })
+  .catch(err => console.warn('[vox] mic denied:', err.message))
+
+setState('idle')
+console.log('[vox renderer] ready — ⌥Space to start recording, ⌥Space again to stop & send')
+</script>
+</body>
+</html>
