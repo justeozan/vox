@@ -9,8 +9,28 @@ const WINDOW_WIDTH = 480
 const WINDOW_HEIGHT = 56
 const AGENT_TIMEOUT_MS = 120_000
 const OLLAMA_MODEL = process.env.VOX_MODEL || 'gemma3:1b-it-qat'
+const REGISTRY_PATH = path.join(os.homedir(), '.vox', 'projects.json')
 
 let activeProjectPath = process.env.VOX_PROJECT || process.cwd()
+
+// ── Project registry ──────────────────────────────────────────────────────────
+function loadRegistry() {
+  try { return JSON.parse(fs.readFileSync(REGISTRY_PATH, 'utf8')) } catch { return {} }
+}
+
+function saveRegistry(reg) {
+  fs.mkdirSync(path.dirname(REGISTRY_PATH), { recursive: true })
+  fs.writeFileSync(REGISTRY_PATH, JSON.stringify(reg, null, 2))
+}
+
+// Bootstrap registry with the active project on first run
+function ensureRegistry() {
+  if (!fs.existsSync(REGISTRY_PATH)) {
+    const name = path.basename(activeProjectPath)
+    saveRegistry({ [name]: activeProjectPath })
+    console.log(`[vox] created ~/.vox/projects.json with "${name}"`)
+  }
+}
 
 // ── CLI path detection ────────────────────────────────────────────────────────
 let claudePath
@@ -54,7 +74,11 @@ function updateAgentCount(delta) {
 function spawnAgent(task) {
   if (!claudePath) { console.error('[vox] no claude CLI'); return }
   updateAgentCount(+1)
-  const proc = spawn(claudePath, ['--print', task], { cwd: activeProjectPath, shell: false })
+  const proc = spawn(claudePath, ['--print', '--dangerously-skip-permissions', task], {
+    cwd: activeProjectPath,
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
   const timer = setTimeout(() => { proc.kill(); updateAgentCount(-1) }, AGENT_TIMEOUT_MS)
   proc.stderr.on('data', d => console.error('[agent]', d.toString().slice(0, 200)))
   proc.on('close', () => { clearTimeout(timer); updateAgentCount(-1) })
@@ -117,8 +141,16 @@ async function transcribeAudio(audioBuffer) {
 async function askOllama(transcript) {
   history.push({ role: 'user', content: transcript })
 
+  const registry = loadRegistry()
+  const projectLines = Object.entries(registry)
+    .map(([name, p]) => `  - ${name} → ${p}`)
+    .join('\n') || '  (aucun)'
+
   const systemPrompt = `Tu es Vox, un assistant vocal pour développeurs. Tu orchestres des agents de code en arrière-plan.
 Projet actif : ${activeProjectPath}
+
+Projets disponibles :
+${projectLines}
 
 Réponds TOUJOURS avec un objet JSON valide sur une seule ligne, sans texte autour :
 {"action":"none","text":"ta réponse vocale en français (1-2 phrases max)"}
@@ -126,10 +158,10 @@ Réponds TOUJOURS avec un objet JSON valide sur une seule ligne, sans texte auto
 Pour lancer un agent de code en arrière-plan :
 {"action":"launch_agent","task":"description précise de la tâche","text":"réponse vocale courte"}
 
-Pour changer de projet actif :
-{"action":"switch_project","path":"/chemin/absolu/du/projet","text":"réponse vocale courte"}
+Pour changer de projet (utilise le nom court de la liste) :
+{"action":"switch_project","name":"nom-du-projet","text":"réponse vocale courte"}
 
-Tu peux enchaîner plusieurs actions en les mettant dans un tableau :
+Tu peux enchaîner plusieurs actions en tableau :
 [{"action":"launch_agent","task":"...","text":"Je lance deux agents."},{"action":"launch_agent","task":"...","text":""}]`
 
   const res = await fetch('http://localhost:11434/v1/chat/completions', {
@@ -154,10 +186,18 @@ Tu peux enchaîner plusieurs actions en les mettant dans un tableau :
   const actions = Array.isArray(parsed) ? parsed : [parsed]
   let voiceText = ''
   for (const item of actions) {
-    if (item.action === 'launch_agent' && item.task) spawnAgent(item.task)
-    else if (item.action === 'switch_project' && item.path) {
-      activeProjectPath = item.path
-      console.log('[vox] switched project to:', item.path)
+    if (item.action === 'launch_agent' && item.task) {
+      spawnAgent(item.task)
+    } else if (item.action === 'switch_project') {
+      const registry = loadRegistry()
+      const resolved = (item.name && registry[item.name]) || item.path
+      if (resolved) {
+        activeProjectPath = resolved
+        console.log('[vox] switched project to:', activeProjectPath)
+      } else {
+        console.warn('[vox] project not found:', item.name)
+        if (!voiceText) voiceText = `Je ne connais pas le projet "${item.name}". Ajoute-le dans ~/.vox/projects.json.`
+      }
     }
     if (item.text && !voiceText) voiceText = item.text
   }
@@ -262,6 +302,7 @@ app.whenReady().then(() => {
     win.webContents.send('toggle-listening')
   })
 
+  ensureRegistry()
   console.log('[vox] ready — Option+Space to start/stop recording')
 })
 
