@@ -1,0 +1,1 @@
+/Users/spectre/conductor/repos/vox/.claude/skills/gstack/pair-agent/SKILL.md

@@ -1,0 +1,1 @@
+/Users/spectre/conductor/repos/vox/.claude/skills/gstack/qa-only/SKILL.md
