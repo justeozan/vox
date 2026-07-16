@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: transparent;
+    overflow: hidden;
+    user-select: none;
+    -webkit-app-region: drag;
+  }
+
+  .bar {
+    width: 480px;
+    height: 56px;
+    background: rgba(12, 12, 14, 0.92);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 28px;
+    display: flex;
+    align-items: center;
+    padding: 0 18px;
+    gap: 12px;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+  }
+
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: #2a2a2e;
+    transition: background 0.2s, box-shadow 0.2s;
+  }
+  body.active .dot    { background: #4ade80; box-shadow: 0 0 5px #4ade8033; }
+  body.listening .dot { background: #4ade80; box-shadow: 0 0 10px #4ade8077; }
+  body.thinking .dot  { background: #f59e0b; box-shadow: 0 0 8px #f59e0b66; }
+  body.speaking .dot  { background: #60a5fa; box-shadow: 0 0 8px #60a5fa66; }
+  body.running .dot   { background: #a78bfa; box-shadow: 0 0 8px #a78bfa66; }
+
+  .waveform {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex: 1;
+    height: 28px;
+  }
+  .waveform span {
+    display: block;
+    width: 3px;
+    border-radius: 2px;
+    background: rgba(255,255,255,0.08);
+    transition: background 0.2s;
+    height: 4px;
+  }
+  body.active .waveform span    { background: rgba(74,222,128,0.18); }
+  body.listening .waveform span { background: rgba(74,222,128,0.65); }
+  body.thinking .waveform span  { background: rgba(245,158,11,0.4); }
+  body.speaking .waveform span  { background: rgba(96,165,250,0.6); }
+  body.running .waveform span   { background: rgba(167,139,250,0.3); }
+
+  .label {
+    font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: rgba(255,255,255,0.18);
+    flex-shrink: 0;
+    min-width: 80px;
+    text-align: right;
+    transition: color 0.2s;
+  }
+  body.active .label    { color: rgba(74,222,128,0.4); }
+  body.listening .label { color: rgba(74,222,128,0.7); }
+  body.thinking .label  { color: rgba(245,158,11,0.5); }
+  body.speaking .label  { color: rgba(96,165,250,0.6); }
+  body.running .label   { color: rgba(167,139,250,0.7); }
+
+  .badge {
+    display: none;
+    background: rgba(167,139,250,0.15);
+    border: 1px solid rgba(167,139,250,0.3);
+    color: #a78bfa;
+    font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+    letter-spacing: 0.06em;
+    flex-shrink: 0;
+  }
+  body.running .badge { display: block; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <div class="dot"></div>
+  <div class="waveform" id="waveform"></div>
+  <div class="label" id="label">⌥ space</div>
+  <div class="badge" id="badge">0 agents</div>
+</div>
+
+<script>
+// ── VAD config ────────────────────────────────────────────────────────────────
+const SPEECH_THRESHOLD   = 0.015  // RMS floor to start onset tracking
+const SILENCE_THRESHOLD  = 0.009  // RMS below = silence
+const SILENCE_MS         = 800    // ms of silence before auto-send
+const SPEECH_ONSET_MS    = 80     // ms of sustained speech before recording (filters clicks <20ms)
+const BARGE_IN_THRESHOLD = 0.030  // raised — echo-cancelled TTS bleed stays well below this
+const MIN_SPEECH_SAMPLES = 8000   // 0.5s at 16kHz — ignore micro-sounds
+const AMBIENT_ALPHA      = 0.002  // EMA speed — adapts ambient over ~500 frames ≈ 8s at 60fps
+const SPEECH_SNR         = 2.2    // require 2.2× ambient level to trigger recording
+
+// ── State machine ─────────────────────────────────────────────────────────────
+let state = 'idle'
+let agentCount = 0
+
+function setState(s) {
+  state = s
+  document.body.className = s
+  const labels = {
+    idle:      '⌥ space',
+    active:    'à l\'écoute',
+    listening: 'je t\'entends…',
+    thinking:  'réflexion…',
+    speaking:  'réponse…',
+    running:   'agents actifs',
+  }
+  document.getElementById('label').textContent = labels[s] || ''
+  updateBadge()
+  animateWaveform(s)
+}
+
+function updateBadge() {
+  const badge = document.getElementById('badge')
+  badge.textContent = agentCount + (agentCount === 1 ? ' agent' : ' agents')
+  // Show badge in any active state when agents are running
+  const showBadge = agentCount > 0 && state !== 'idle'
+  badge.style.display = showBadge ? 'block' : 'none'
+}
+
+// ── Waveform animation ────────────────────────────────────────────────────────
+const waveEl = document.getElementById('waveform')
+const BAR_COUNT = 16
+for (let i = 0; i < BAR_COUNT; i++) waveEl.appendChild(document.createElement('span'))
+const bars = waveEl.querySelectorAll('span')
+
+let rafId
+function animateWaveform(s) {
+  cancelAnimationFrame(rafId)
+  bars.forEach(b => b.style.height = '4px')
+  if (s === 'idle') return
+
+  function tick() {
+    const t = Date.now()
+    bars.forEach((b, i) => {
+      let h = 4
+      if (s === 'active') {
+        // Subtle breathing — waiting for voice
+        h = 4 + Math.abs(Math.sin(t / 1800 + i * 0.3)) * 3
+      } else if (s === 'listening') {
+        h = 6 + Math.abs(Math.sin(t / 110 + i * 0.75)) * 22
+      } else if (s === 'thinking') {
+        const phase = (t / 280 + i * 0.5) % (BAR_COUNT * 0.5)
+        h = 4 + Math.max(0, 20 - Math.abs(phase - BAR_COUNT * 0.25) * 3)
+      } else if (s === 'speaking') {
+        h = 5 + Math.abs(Math.sin(t / 95 + i * 0.9)) * 18
+      } else if (s === 'running') {
+        h = i % 4 === 0 ? 4 + Math.abs(Math.sin(t / 600 + i)) * 8 : 4
+      }
+      b.style.height = h.toFixed(1) + 'px'
+    })
+    rafId = requestAnimationFrame(tick)
+  }
+  rafId = requestAnimationFrame(tick)
+}
+
+// ── VAD core ──────────────────────────────────────────────────────────────────
+// audioCtx lives forever after first activation — avoids ~150ms re-creation on each toggle
+let audioCtx        = null
+let analyser        = null
+let processor       = null
+let micStream       = null
+let pcmChunks       = []
+let isRecording     = false
+let currentAudio    = null  // browser Audio element — barge-in can pause it directly
+let ttsStartedAt    = null
+let silenceTimer    = null
+let rafVAD          = null
+let speechOnsetAt   = null
+let ambientRMS      = SPEECH_THRESHOLD * 0.5  // adaptive ambient noise estimate
+
+async function activateVox() {
+  if (micStream) return  // already active
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    })
+
+    // Reuse existing context if possible — resume is near-instant vs. ~150ms for new()
+    if (!audioCtx || audioCtx.state === 'closed') {
+      audioCtx = new AudioContext({ sampleRate: 16000 })
+    } else if (audioCtx.state === 'suspended') {
+      await audioCtx.resume()
+    }
+
+    const source = audioCtx.createMediaStreamSource(micStream)
+
+    analyser = audioCtx.createAnalyser()
+    analyser.fftSize = 512
+    source.connect(analyser)
+
+    processor = audioCtx.createScriptProcessor(2048, 1, 1)
+    processor.onaudioprocess = (e) => {
+      if (isRecording && !currentAudio) {
+        pcmChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)))
+      }
+    }
+    source.connect(processor)
+    processor.connect(audioCtx.destination)
+
+    setState('active')
+    vadTick()
+  } catch (err) {
+    console.error('[vox] activateVox failed:', err.message)
+  }
+}
+
+function deactivateVox() {
+  cancelAnimationFrame(rafVAD)
+  clearTimeout(silenceTimer)
+  silenceTimer = null
+  isRecording = false
+  currentAudio = null
+  pcmChunks = []
+  speechOnsetAt = null
+  processor?.disconnect()
+  analyser?.disconnect()
+  processor = null
+  analyser = null
+  micStream?.getTracks().forEach(t => t.stop())
+  micStream = null
+  // Suspend (not close) audioCtx — resumes in <10ms on next activation
+  audioCtx?.suspend()
+  setState(agentCount > 0 ? 'running' : 'idle')
+}
+
+function getRMS() {
+  const buf = new Float32Array(analyser.fftSize)
+  analyser.getFloatTimeDomainData(buf)
+  let sum = 0; for (const s of buf) sum += s * s
+  return Math.sqrt(sum / buf.length)
+}
+
+function vadTick() {
+  if (!analyser) return
+  const rms = getRMS()
+
+  if (currentAudio) {
+    // Barge-in: browser audio → echo cancellation works → safe to check RMS
+    // Guard 1200ms so initial transient from speakers doesn't false-trigger
+    if (rms > BARGE_IN_THRESHOLD && ttsStartedAt && Date.now() - ttsStartedAt > 1200) {
+      currentAudio.pause()
+      currentAudio = null
+      isRecording = false
+      pcmChunks = []
+      clearTimeout(silenceTimer); silenceTimer = null
+      window.vox.audioDone()
+      setState('active')
+    }
+  } else if (state === 'active' || state === 'running') {
+    if (!isRecording) {
+      // Adaptive threshold: requires SPEECH_SNR × ambient, floored at SPEECH_THRESHOLD.
+      // If a video is playing, ambientRMS adapts up so background speech can't trigger.
+      const triggerThreshold = Math.max(SPEECH_THRESHOLD, ambientRMS * SPEECH_SNR)
+
+      if (rms > triggerThreshold) {
+        if (!speechOnsetAt) speechOnsetAt = Date.now()
+        else if (Date.now() - speechOnsetAt > SPEECH_ONSET_MS) {
+          isRecording = true
+          pcmChunks = []
+          speechOnsetAt = null
+          clearTimeout(silenceTimer); silenceTimer = null
+          setState('listening')
+        }
+      } else {
+        speechOnsetAt = null
+        // Update ambient estimate only during non-speech quiet periods
+        ambientRMS = ambientRMS * (1 - AMBIENT_ALPHA) + rms * AMBIENT_ALPHA
+      }
+    }
+  } else if (state === 'listening') {
+    if (rms < SILENCE_THRESHOLD) {
+      if (!silenceTimer) silenceTimer = setTimeout(sendSpeech, SILENCE_MS)
+    } else {
+      clearTimeout(silenceTimer); silenceTimer = null
+    }
+  }
+
+  rafVAD = requestAnimationFrame(vadTick)
+}
+
+function sendSpeech() {
+  clearTimeout(silenceTimer); silenceTimer = null
+  if (!isRecording) return
+  isRecording = false
+
+  const totalSamples = pcmChunks.reduce((n, c) => n + c.length, 0)
+  const sampleRate = audioCtx?.sampleRate || 16000
+
+  if (totalSamples < MIN_SPEECH_SAMPLES) {
+    // Too short — noise, ignore and go back to active
+    pcmChunks = []
+    setState(micStream ? 'active' : 'idle')
+    return
+  }
+
+  setState('thinking')
+  const merged = new Float32Array(totalSamples)
+  let off = 0; for (const c of pcmChunks) { merged.set(c, off); off += c.length }
+  pcmChunks = []
+
+  window.vox.sendAudio(encodeWAV(merged, sampleRate))
+}
+
+// WAV encoder (float32 PCM → WAV, no ffmpeg)
+function encodeWAV(samples, sampleRate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2)
+  const v = new DataView(buf)
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)) }
+  str(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true)
+  str(8, 'WAVE'); str(12, 'fmt ')
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true)
+  v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * 2, true)
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true)
+  str(36, 'data'); v.setUint32(40, samples.length * 2, true)
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]))
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true)
+  }
+  return buf
+}
+
+// ── Toggle: ⌥Space active/inactive ───────────────────────────────────────────
+async function toggleVox() {
+  if (state === 'idle' || state === 'running') {
+    await activateVox()
+  } else if (state !== 'thinking' && state !== 'speaking') {
+    deactivateVox()
+  }
+}
+
+// ── IPC from main ─────────────────────────────────────────────────────────────
+window.vox.onToggleListen(toggleVox)
+
+window.vox.onSpeakingStart(() => {
+  ttsStartedAt = Date.now()
+  setState('speaking')
+})
+
+window.vox.onSpeakingDone(() => {
+  currentAudio = null
+  setState(micStream ? 'active' : (agentCount > 0 ? 'running' : 'idle'))
+})
+
+// Kokoro audio: played in browser so echo cancellation works for barge-in
+window.vox.onPlayWav((filePath) => {
+  currentAudio = new Audio(`file://${filePath}`)
+  currentAudio.onended = () => { currentAudio = null; window.vox.audioDone() }
+  currentAudio.onerror = () => { currentAudio = null; window.vox.audioDone() }
+  currentAudio.play().catch(() => { currentAudio = null; window.vox.audioDone() })
+})
+
+window.vox.onAgentStatus(({ count }) => {
+  agentCount = count
+  if (state !== 'listening' && state !== 'thinking' && state !== 'speaking' && state !== 'active') {
+    setState(count > 0 ? 'running' : 'idle')
+  } else {
+    updateBadge()
+  }
+})
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+navigator.mediaDevices.getUserMedia({ audio: true })
+  .then(stream => { stream.getTracks().forEach(t => t.stop()); console.log('[vox] mic ok') })
+  .catch(err => console.warn('[vox] mic denied:', err.message))
+
+setState('idle')
+console.log('[vox renderer] ready — ⌥Space to activate, parle, silence → envoie automatiquement')
+</script>
+</body>
+</html>
