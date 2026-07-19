@@ -1,0 +1,37 @@
+graph TD
+    subgraph BOOT["DÉMARRAGE"]
+        A["main.rs"] -->|vox_lib::run| B["load_settings\n~/.vox/settings.json"]
+        B --> C["create AppState\nArc + Mutex + Atomics"]
+        C --> D["Tauri Builder\nplugin, manage, invoke_handler"]
+        D --> E["setup callback\nmain thread"]
+    end
+
+    subgraph SETUP["SETUP — main thread"]
+        E --> F["ActivationPolicy::Accessory\npas de Dock icon"]
+        F --> G["window_vibrancy\nNSVisualEffectView radius 28px"]
+        G --> H["ObjC2: CanJoinAllSpaces\nFullScreenAuxiliary\nNSStatusWindowLevel"]
+        H --> I["register shortcuts\nAlt+Space + Cmd+comma"]
+        I --> J["show + 400ms retry\naccessory ordering fix"]
+    end
+
+    subgraph BG["BACKGROUND THREAD — lourd"]
+        J --> K["ensure_registry\n~/.vox/projects.json"]
+        K --> L["init_paths\nfind: whisper, python3, claude CLI"]
+        L --> M["start_stt\npython + vox_stt.py"]
+        L --> N["start_tts\npython + vox_tts.py"]
+        N -->|daemon ready| O["speak_startup_brief"]
+    end
+
+    subgraph BRIEF["STARTUP BRIEF"]
+        O --> P["read_state 10\nsqlite3 conductor.db"]
+        P --> Q["workspace_sentence\nworking / error / idle"]
+        Q --> R["chat_once Ollama\nrecommandation 1 phrase"]
+        R --> S["speech::speak\nKokoro TTS"]
+        S --> T["emit play-wav\nrenderer joue le WAV"]
+        T --> U["emit speaking-done\npilule au repos"]
+    end
+
+    style BOOT fill:#1a1a2e,stroke:#a78bfa,color:#fff
+    style SETUP fill:#1a1a2e,stroke:#60a5fa,color:#fff
+    style BG fill:#1a1a2e,stroke:#4ade80,color:#fff
+    style BRIEF fill:#1a1a2e,stroke:#f59e0b,color:#fff
