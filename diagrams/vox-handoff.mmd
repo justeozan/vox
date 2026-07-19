@@ -1,0 +1,57 @@
+graph TD
+    subgraph VOICE["🎤 BOUCLE VOCALE (Option+Space)"]
+        A["⌥Space → toggleVox"] --> B["activateVox<br/>getUserMedia + AudioContext<br/>16kHz, echoCancellation"]
+        B --> C["vadTick<br/>RAF loop: RMS → SNR threshold"]
+        C -->|speech onset >80ms| D["setState: listening<br/>PCM chunks accumulés"]
+        D -->|silence 800ms| E["sendSpeech<br/>encode WAV → base64"]
+        E --> F["invoke voice_input"]
+    end
+
+    subgraph PIPELINE["⚙️ PIPELINE (Rust main thread)"]
+        F --> G["write WAV temp file"]
+        G --> H{"STT daemon<br/>prêt ?"}
+        H -->|oui| I["daemon.request<br/>stdin line → stdout result"]
+        H -->|non| J["whisper CLI fallback<br/>whisper --model small"]
+        I --> K["emit transcript<br/>lettre par lettre"]
+        J --> K
+        K --> L["llm::ask_ollama<br/>Ollama /v1/chat/completions"]
+    end
+
+    subgraph LLM["🧠 LLM + TOOLS"]
+        L --> M{"Tools API<br/>supported ?"}
+        M -->|attempt 1| N["vox_tools:<br/>launch_agent<br/>switch_project"]
+        M -->|échec| O["attempt 2:<br/>JSON prompt fallback<br/>parse_json robust"]
+        N --> P{"tool_calls ?"}
+        P -->|oui| Q["apply_action"]
+        P -->|non| R["text response<br/>1 phrase courte"]
+        O --> S["parse JSON action<br/>launch_agent / switch_project"]
+        S --> Q
+        Q --> T{"action type"}
+        T -->|launch_agent| U["agents::spawn_agent<br/>claude --print --dangerously-skip-permissions"]
+        T -->|switch_project| V["active_project = registry lookup"]
+    end
+
+    subgraph AGENT["🤖 AGENT (subprocess)"]
+        U --> W["Command::spawn<br/>current_dir = active_project"]
+        W --> X["agent_count++<br/>emit agent-status<br/>badge violet affiché"]
+        X --> Y["poll loop 200ms<br/>timeout 120s"]
+        Y -->|done| Z["agent_count--<br/>emit agent-status"]
+    end
+
+    subgraph SPEAK["🔊 SORTIE VOCALE"]
+        R --> AA["speech::speak"]
+        Q -->|voice text| AA
+        AA --> AB{"Kokoro<br/>prêt ?"}
+        AB -->|oui| AC["synthesize_kokoro<br/>path\\ttext → stdout ok:path"]
+        AB -->|non| AD["say fallback<br/>macOS say -v voice"]
+        AC --> AE["emit play-wav<br/>renderer Audio.play()"]
+        AE --> AF["echo cancellation active<br/>barge-in possible si RMS > 0.030"]
+        AF --> AG["audio_done → speaking-done<br/>pilule retourne au repos"]
+        AD --> AG
+    end
+
+    style VOICE fill:#1a1a2e,stroke:#4ade80,color:#fff
+    style PIPELINE fill:#1a1a2e,stroke:#f59e0b,color:#fff
+    style LLM fill:#1a1a2e,stroke:#60a5fa,color:#fff
+    style AGENT fill:#1a1a2e,stroke:#a78bfa,color:#fff
+    style SPEAK fill:#1a1a2e,stroke:#60a5fa,color:#fff

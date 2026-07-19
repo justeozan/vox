@@ -1,3 +1,5 @@
 node_modules/
 .gstack/
 test
+src-tauri/target/
+scripts/icon-src.png

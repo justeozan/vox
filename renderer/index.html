@@ -2,133 +2,541 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
+  :root {
+    --green:  #4ade80;
+    --amber:  #f59e0b;
+    --blue:   #60a5fa;
+    --violet: #a78bfa;
+    --boot:   #c4b5fd;
+    --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+    --smooth: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  html, body { height: 100%; background: transparent; }
+
   body {
-    background: transparent;
     overflow: hidden;
     user-select: none;
-    -webkit-app-region: drag;
+    -webkit-user-select: none;
+    font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+    color: #fff;
+    cursor: default;
   }
 
-  .bar {
-    width: 480px;
-    height: 56px;
-    background: rgba(12, 12, 14, 0.92);
-    border: 1px solid rgba(255,255,255,0.07);
+  /* ── Shell — the pill. The REAL blur is the native NSVisualEffectView
+       behind this window, rounded at the same 28px radius, so the CSS layer
+       only tints and outlines. Nothing can overflow: the vibrancy view is
+       clipped by AppKit itself. */
+  .shell {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    /* Translucent enough that the native blur reads through — with the
+       vibrancy view now correctly BELOW the webview, the pill stays dark
+       and premium without killing the real-time blur. */
+    background: rgba(10, 10, 15, 0.62);
+    border: 1px solid rgba(255, 255, 255, 0.13);
     border-radius: 28px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09);
+    overflow: hidden;
+    transition: border-color 0.35s ease, box-shadow 0.35s ease;
+  }
+
+  /* Glows are INSET so they follow the pill's rounded corners. An outer
+     box-shadow would bleed past the pill and get clipped to the window's
+     rectangle — the "square corners" behind the violet/blue layers. */
+  body.boot      .shell { border-color: rgba(196,181,253,0.6); box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 26px rgba(196,181,253,0.42); }
+  body.active    .shell { border-color: rgba(74,222,128,0.32); }
+  body.listening .shell { border-color: rgba(74,222,128,0.6);  animation: shellPulseGreen 2.2s ease-in-out infinite; }
+  body.thinking  .shell { border-color: rgba(245,158,11,0.5); }
+  body.speaking  .shell { border-color: rgba(96,165,250,0.55); animation: shellPulseBlue 2.6s ease-in-out infinite; }
+  body.running   .shell { border-color: rgba(167,139,250,0.4); }
+
+  @keyframes shellPulseGreen {
+    0%, 100% { box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 14px rgba(74,222,128,0.14); }
+    50%      { box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 28px rgba(74,222,128,0.34); }
+  }
+  @keyframes shellPulseBlue {
+    0%, 100% { box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 14px rgba(96,165,250,0.12); }
+    50%      { box-shadow: inset 0 1px 0 rgba(96,165,250,0.30), inset 0 0 28px rgba(96,165,250,0.30); }
+  }
+
+  /* ── Boot sweep — violet sheen crossing once when the recap begins */
+  .boot-sweep {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0;
+    z-index: 3;
+    background: linear-gradient(100deg,
+      transparent 15%,
+      rgba(196,181,253,0.05) 35%,
+      rgba(196,181,253,0.30) 50%,
+      rgba(196,181,253,0.05) 65%,
+      transparent 85%);
+    transform: translateX(-110%);
+  }
+  body.boot .boot-sweep { animation: bootSweep 1.1s var(--smooth) 2; }
+  @keyframes bootSweep {
+    0%   { opacity: 0; transform: translateX(-110%); }
+    25%  { opacity: 1; }
+    100% { opacity: 0; transform: translateX(110%); }
+  }
+
+  /* ── Settings panel (above the bar; the bar stays put at the bottom) ────
+     The window grows UPWARD (bottom edge pinned), so the panel content is
+     bottom-anchored (justify-content:flex-end) to sit still against the bar
+     while the window expands — otherwise every row slides as it grows. The
+     whole panel cross-fades in once; no per-row motion. */
+  .settings {
+    display: none;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 16px 22px 4px 22px;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+  body.settings-open .settings {
+    display: flex;
+    animation: settingsIn 0.3s var(--smooth) forwards;
+  }
+  @keyframes settingsIn { from { opacity: 0; } to { opacity: 1; } }
+
+  .settings-header {
     display: flex;
     align-items: center;
-    padding: 0 18px;
-    gap: 12px;
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    justify-content: space-between;
+    margin-bottom: 10px;
   }
 
-  .dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
+  .settings-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.5);
+  }
+  .settings-hint { font-size: 10px; color: rgba(255,255,255,0.28); }
+  .settings-hint kbd {
+    font-family: inherit;
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.09);
+    margin: 0 1px;
+  }
+
+  .setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-top: 1px solid rgba(255,255,255,0.05);
+    min-height: 40px;
+  }
+
+  .setting-label { font-size: 12.5px; color: rgba(255,255,255,0.78); }
+  .setting-value { font-size: 12px; color: rgba(255,255,255,0.5); font-variant-numeric: tabular-nums; }
+
+  /* Update row: version + check/download button */
+  .update-btn {
+    -webkit-appearance: none;
+    appearance: none;
+    background: rgba(167,139,250,0.16);
+    border: 1px solid rgba(167,139,250,0.35);
+    color: #d9ceff;
+    font-size: 11px;
+    font-family: inherit;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 6px 14px;
+    border-radius: 9px;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s, transform 0.15s var(--spring);
+  }
+  .update-btn:hover { background: rgba(167,139,250,0.26); border-color: rgba(167,139,250,0.55); }
+  .update-btn:active { transform: scale(0.95); }
+  .update-btn:disabled { opacity: 0.5; cursor: default; }
+  .update-btn.ok { background: rgba(74,222,128,0.14); border-color: rgba(74,222,128,0.4); color: #b6f2cd; }
+
+  select.setting-select {
+    -webkit-appearance: none;
+    appearance: none;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.10);
+    color: #fff;
+    font-size: 12px;
+    padding: 6px 28px 6px 12px;
+    border-radius: 9px;
+    outline: none;
+    font-family: inherit;
+    cursor: pointer;
+    max-width: 220px;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='rgba(255,255,255,0.5)' d='M0 0l5 6 5-6z'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 9px center;
+    transition: border-color 0.2s, background-color 0.2s, transform 0.15s var(--spring);
+  }
+  select.setting-select:hover { border-color: rgba(255,255,255,0.2); background-color: rgba(255,255,255,0.08); }
+  select.setting-select:focus { border-color: rgba(167,139,250,0.6); }
+  select.setting-select:active { transform: scale(0.97); }
+
+  .segment {
+    display: inline-flex;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 9px;
+    padding: 2px;
+    gap: 2px;
+  }
+  .segment button {
+    background: transparent;
+    border: none;
+    color: rgba(255,255,255,0.55);
+    font-size: 11px;
+    font-family: inherit;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    padding: 5px 13px;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: background 0.25s, color 0.25s, transform 0.2s var(--spring);
+  }
+  .segment button:hover { color: rgba(255,255,255,0.85); }
+  .segment button:active { transform: scale(0.92); }
+  .segment button.on {
+    background: rgba(167,139,250,0.22);
+    color: #d9ceff;
+    box-shadow: inset 0 0 0 1px rgba(167,139,250,0.4);
+    animation: segPop 0.3s var(--spring);
+  }
+  @keyframes segPop { 50% { transform: scale(1.08); } }
+
+  /* ── Bar row — always pinned at the bottom of the pill ─────────────────── */
+  .bar {
+    position: relative;
+    height: 56px;
     flex-shrink: 0;
-    background: #2a2a2e;
-    transition: background 0.2s, box-shadow 0.2s;
+    display: flex;
+    align-items: center;
+    padding: 0 19px;
+    gap: 12px;
+    margin-top: auto;
   }
-  body.active .dot    { background: #4ade80; box-shadow: 0 0 5px #4ade8033; }
-  body.listening .dot { background: #4ade80; box-shadow: 0 0 10px #4ade8077; }
-  body.thinking .dot  { background: #f59e0b; box-shadow: 0 0 8px #f59e0b66; }
-  body.speaking .dot  { background: #60a5fa; box-shadow: 0 0 8px #60a5fa66; }
-  body.running .dot   { background: #a78bfa; box-shadow: 0 0 8px #a78bfa66; }
 
+  /* ── Dot + listening ripple rings ──────────────────────────────────────── */
+  .dot-wrap { position: relative; width: 8px; height: 8px; flex-shrink: 0; }
+  .dot {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: #5a5a64;
+    transition: background 0.3s, box-shadow 0.3s, transform 0.3s var(--spring);
+  }
+  .ring {
+    position: absolute;
+    inset: -1px;
+    border-radius: 50%;
+    border: 1.5px solid var(--green);
+    opacity: 0;
+    pointer-events: none;
+  }
+  body.active .dot    { background: var(--green);  box-shadow: 0 0 6px rgba(74,222,128,0.4); }
+  body.listening .dot { background: var(--green);  box-shadow: 0 0 12px rgba(74,222,128,0.7); transform: scale(1.15); }
+  body.thinking .dot  { background: var(--amber);  box-shadow: 0 0 9px rgba(245,158,11,0.6); animation: dotThink 1s ease-in-out infinite; }
+  body.speaking .dot  { background: var(--blue);   box-shadow: 0 0 9px rgba(96,165,250,0.6); }
+  body.running .dot   { background: var(--violet); box-shadow: 0 0 9px rgba(167,139,250,0.6); }
+  body.boot .dot      { background: var(--boot);   box-shadow: 0 0 16px rgba(196,181,253,0.95); animation: bootDot 1s var(--spring); }
+
+  body.listening .ring.r1 { animation: ripple 1.6s ease-out infinite; }
+  body.listening .ring.r2 { animation: ripple 1.6s ease-out 0.55s infinite; }
+  body.speaking .ring.r1  { border-color: var(--blue); animation: ripple 2s ease-out infinite; }
+
+  @keyframes ripple {
+    0%   { opacity: 0.8; transform: scale(1); }
+    100% { opacity: 0;   transform: scale(3.6); }
+  }
+  @keyframes dotThink {
+    0%, 100% { transform: scale(1); }
+    50%      { transform: scale(0.72); }
+  }
+  @keyframes bootDot {
+    0%   { transform: scale(0.3); opacity: 0.2; }
+    45%  { transform: scale(1.8); opacity: 1; }
+    100% { transform: scale(1); }
+  }
+
+  /* ── Waveform ──────────────────────────────────────────────────────────── */
   .waveform {
     display: flex;
     align-items: center;
     gap: 3px;
     flex: 1;
-    height: 28px;
+    height: 30px;
+    min-width: 0;
+    transition: opacity 0.3s ease;
   }
   .waveform span {
     display: block;
     width: 3px;
     border-radius: 2px;
-    background: rgba(255,255,255,0.08);
-    transition: background 0.2s;
+    background: rgba(255,255,255,0.25);
+    transition: background 0.3s;
     height: 4px;
   }
-  body.active .waveform span    { background: rgba(74,222,128,0.18); }
-  body.listening .waveform span { background: rgba(74,222,128,0.65); }
-  body.thinking .waveform span  { background: rgba(245,158,11,0.4); }
-  body.speaking .waveform span  { background: rgba(96,165,250,0.6); }
-  body.running .waveform span   { background: rgba(167,139,250,0.3); }
+  body.active .waveform span    { background: rgba(74,222,128,0.30); }
+  body.listening .waveform span { background: rgba(74,222,128,0.75); }
+  body.thinking .waveform span  { background: rgba(245,158,11,0.5); }
+  body.speaking .waveform span  { background: rgba(96,165,250,0.7); }
+  body.running .waveform span   { background: rgba(167,139,250,0.4); }
+  body.boot .waveform span      { background: rgba(196,181,253,0.9); }
+  body.has-transcript .waveform { opacity: 0.25; }
 
-  .label {
-    font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
-    font-size: 11px;
-    letter-spacing: 0.04em;
-    color: rgba(255,255,255,0.18);
-    flex-shrink: 0;
-    min-width: 80px;
-    text-align: right;
-    transition: color 0.2s;
+  /* ── Transcript overlay — per-letter reveal ────────────────────────────── */
+  .transcript {
+    position: absolute;
+    left: 41px;
+    right: 150px;
+    top: 50%;
+    transform: translateY(-50%);
+    pointer-events: none;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: rgba(255,255,255,0.95);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    opacity: 0;
+    transition: opacity 0.35s ease;
+    text-shadow: 0 1px 8px rgba(0,0,0,0.4);
+    z-index: 2;
   }
-  body.active .label    { color: rgba(74,222,128,0.4); }
-  body.listening .label { color: rgba(74,222,128,0.7); }
-  body.thinking .label  { color: rgba(245,158,11,0.5); }
-  body.speaking .label  { color: rgba(96,165,250,0.6); }
-  body.running .label   { color: rgba(167,139,250,0.7); }
+  .transcript.visible { opacity: 1; }
+  .transcript .ch {
+    display: inline-block;
+    opacity: 0;
+    transform: translateY(4px) scale(0.9);
+    animation: chIn 0.3s var(--smooth) forwards;
+  }
+  .transcript .ch.sp { width: 0.28em; }
+  @keyframes chIn { to { opacity: 1; transform: translateY(0) scale(1); } }
+  .transcript .caret {
+    display: inline-block;
+    width: 2px;
+    height: 13px;
+    margin-left: 3px;
+    vertical-align: -2px;
+    background: currentColor;
+    opacity: 0.7;
+    animation: caretBlink 1s steps(2, start) infinite;
+  }
+  @keyframes caretBlink { 50% { opacity: 0; } }
 
+  /* ── Label ─────────────────────────────────────────────────────────────── */
+  .label {
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    color: rgba(255,255,255,0.42);
+    flex-shrink: 0;
+    min-width: 84px;
+    text-align: right;
+    transition: color 0.3s;
+  }
+  body.active .label    { color: rgba(74,222,128,0.6); }
+  body.listening .label { color: rgba(74,222,128,0.9); }
+  body.thinking .label  { color: rgba(245,158,11,0.7); background: linear-gradient(90deg, rgba(245,158,11,0.5), #ffd188, rgba(245,158,11,0.5)); background-size: 200% 100%; -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: shimmer 1.6s linear infinite; }
+  body.speaking .label  { color: rgba(96,165,250,0.8); }
+  body.running .label   { color: rgba(167,139,250,0.9); }
+  body.boot .label      { color: rgba(196,181,253,0.95); }
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+  /* ── Agent badge ───────────────────────────────────────────────────────── */
   .badge {
     display: none;
-    background: rgba(167,139,250,0.15);
-    border: 1px solid rgba(167,139,250,0.3);
-    color: #a78bfa;
-    font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+    background: rgba(167,139,250,0.16);
+    border: 1px solid rgba(167,139,250,0.35);
+    color: #c3b1fc;
     font-size: 10px;
-    font-weight: 600;
-    padding: 2px 8px;
+    font-weight: 700;
+    padding: 2px 9px;
     border-radius: 10px;
     letter-spacing: 0.06em;
     flex-shrink: 0;
+    animation: badgePop 0.4s var(--spring);
   }
-  body.running .badge { display: block; }
+  @keyframes badgePop {
+    from { transform: scale(0.5); opacity: 0; }
+    to   { transform: scale(1); opacity: 1; }
+  }
+
+  /* ── Gear — revealed on hover with a spin-in ───────────────────────────── */
+  .gear {
+    width: 0;
+    height: 20px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: rgba(255,255,255,0.5);
+    cursor: pointer;
+    flex-shrink: 0;
+    opacity: 0;
+    overflow: hidden;
+    transform: rotate(-160deg) scale(0.4);
+    transition:
+      width 0.35s var(--smooth),
+      opacity 0.35s ease,
+      transform 0.55s var(--spring),
+      color 0.25s ease;
+  }
+  body.hovered .gear, body.settings-open .gear {
+    width: 20px;
+    opacity: 1;
+    transform: rotate(0deg) scale(1);
+  }
+  .gear:hover { color: #d9ceff; transform: rotate(50deg) scale(1.12) !important; }
+  .gear:active { transform: rotate(120deg) scale(0.95) !important; }
+  .gear svg { display: block; width: 20px; height: 20px; }
+  body.settings-open .gear { color: #c3b1fc; }
+
+  /* Hover: everything breathes a little wider */
+  .bar > * { transition: transform 0.3s var(--smooth); }
+  body.hovered .bar { gap: 13px; }
 </style>
 </head>
 <body>
-<div class="bar">
-  <div class="dot"></div>
-  <div class="waveform" id="waveform"></div>
-  <div class="label" id="label">⌥ space</div>
-  <div class="badge" id="badge">0 agents</div>
+<div class="shell" data-tauri-drag-region>
+  <div class="boot-sweep"></div>
+
+  <div class="settings" id="settings">
+    <div class="settings-header">
+      <div class="settings-title" id="settings-title">paramètres</div>
+      <div class="settings-hint"><kbd>⌘</kbd><kbd>,</kbd></div>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label" id="lbl-model">Modèle</div>
+      <select id="model-select" class="setting-select"></select>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label" id="lbl-lang">Langue</div>
+      <div class="segment" id="lang-segment">
+        <button data-lang="fr">FR</button>
+        <button data-lang="en">EN</button>
+      </div>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label" id="lbl-version">Version</div>
+      <div class="setting-value" id="app-version">—</div>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label" id="lbl-update">Mises à jour</div>
+      <button class="update-btn" id="update-btn">Vérifier</button>
+    </div>
+  </div>
+
+  <div class="bar" data-tauri-drag-region>
+    <div class="dot-wrap">
+      <div class="dot"></div>
+      <span class="ring r1"></span>
+      <span class="ring r2"></span>
+    </div>
+    <div class="waveform" id="waveform" data-tauri-drag-region></div>
+    <div class="transcript" id="transcript"></div>
+    <div class="label" id="label" data-tauri-drag-region>⌥ space</div>
+    <div class="badge" id="badge">0 agents</div>
+    <button class="gear" id="gear" aria-label="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3.2"/>
+        <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01a1.7 1.7 0 0 0 1.02-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.56 1.02H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1.06z"/>
+      </svg>
+    </button>
+  </div>
 </div>
 
 <script>
+// ── Tauri bridge ──────────────────────────────────────────────────────────────
+const { invoke } = window.__TAURI__.core
+const { listen } = window.__TAURI__.event
+const { convertFileSrc } = window.__TAURI__.core
+
 // ── VAD config ────────────────────────────────────────────────────────────────
-const SPEECH_THRESHOLD   = 0.015  // RMS floor to start onset tracking
-const SILENCE_THRESHOLD  = 0.009  // RMS below = silence
-const SILENCE_MS         = 800    // ms of silence before auto-send
-const SPEECH_ONSET_MS    = 80     // ms of sustained speech before recording (filters clicks <20ms)
-const BARGE_IN_THRESHOLD = 0.030  // raised — echo-cancelled TTS bleed stays well below this
-const MIN_SPEECH_SAMPLES = 8000   // 0.5s at 16kHz — ignore micro-sounds
-const AMBIENT_ALPHA      = 0.002  // EMA speed — adapts ambient over ~500 frames ≈ 8s at 60fps
-const SPEECH_SNR         = 2.2    // require 2.2× ambient level to trigger recording
+const SPEECH_THRESHOLD   = 0.015
+const SILENCE_THRESHOLD  = 0.009
+const SILENCE_MS         = 800
+const SPEECH_ONSET_MS    = 80
+const BARGE_IN_THRESHOLD = 0.030
+const MIN_SPEECH_SAMPLES = 8000
+const AMBIENT_ALPHA      = 0.002
+const SPEECH_SNR         = 2.2
+
+// ── Window geometry (must mirror the Rust animate_frame anchoring) ──────────
+// Hover growth is HORIZONTAL ONLY — height never changes on hover.
+const SIZE_BASE     = [480, 56]
+const SIZE_HOVER    = [524, 56]
+const SIZE_SETTINGS = [500, 396]
 
 // ── State machine ─────────────────────────────────────────────────────────────
 let state = 'idle'
 let agentCount = 0
+let settingsOpen = false
+let hovered = false
+let uiLang = 'fr'
+
+const LABEL_TABLE = {
+  fr: {
+    idle: '⌥ space', active: 'à l\'écoute', listening: 'je t\'entends…',
+    thinking: 'réflexion…', speaking: 'réponse…', running: 'agents actifs',
+    boot: 'récap en cours…',
+    settingsTitle: 'paramètres', model: 'Modèle', lang: 'Langue',
+    version: 'Version', update: 'Mises à jour',
+    check: 'Vérifier', checking: '…', upToDate: 'À jour', download: 'Télécharger',
+  },
+  en: {
+    idle: '⌥ space', active: 'listening', listening: 'I hear you…',
+    thinking: 'thinking…', speaking: 'replying…', running: 'agents active',
+    boot: 'briefing…',
+    settingsTitle: 'settings', model: 'Model', lang: 'Language',
+    version: 'Version', update: 'Updates',
+    check: 'Check', checking: '…', upToDate: 'Up to date', download: 'Download',
+  },
+}
+
+const labelEl = document.getElementById('label')
+let lastLabel = ''
+
+function setLabel(text) {
+  if (text === lastLabel) return
+  lastLabel = text
+  // Crossfade + slide via WAAPI
+  labelEl.animate(
+    [{ opacity: 1, transform: 'translateY(0)' }, { opacity: 0, transform: 'translateY(-7px)' }],
+    { duration: 110, easing: 'ease-in', fill: 'forwards' }
+  ).onfinish = () => {
+    labelEl.textContent = text
+    labelEl.animate(
+      [{ opacity: 0, transform: 'translateY(7px)' }, { opacity: 1, transform: 'translateY(0)' }],
+      { duration: 200, easing: 'cubic-bezier(0.22, 1, 0.36, 1)', fill: 'forwards' }
+    )
+  }
+}
+
+function bodyClasses() {
+  document.body.className = state
+    + (settingsOpen ? ' settings-open' : '')
+    + (hovered ? ' hovered' : '')
+    + (transcriptEl.classList.contains('visible') ? ' has-transcript' : '')
+}
 
 function setState(s) {
   state = s
-  document.body.className = s
-  const labels = {
-    idle:      '⌥ space',
-    active:    'à l\'écoute',
-    listening: 'je t\'entends…',
-    thinking:  'réflexion…',
-    speaking:  'réponse…',
-    running:   'agents actifs',
-  }
-  document.getElementById('label').textContent = labels[s] || ''
+  bodyClasses()
+  const labels = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+  setLabel(labels[s] || '')
   updateBadge()
   animateWaveform(s)
 }
@@ -136,39 +544,43 @@ function setState(s) {
 function updateBadge() {
   const badge = document.getElementById('badge')
   badge.textContent = agentCount + (agentCount === 1 ? ' agent' : ' agents')
-  // Show badge in any active state when agents are running
-  const showBadge = agentCount > 0 && state !== 'idle'
-  badge.style.display = showBadge ? 'block' : 'none'
+  badge.style.display = (agentCount > 0 && state !== 'idle') ? 'block' : 'none'
 }
 
-// ── Waveform animation ────────────────────────────────────────────────────────
+// ── Waveform ──────────────────────────────────────────────────────────────────
 const waveEl = document.getElementById('waveform')
-const BAR_COUNT = 16
+const BAR_COUNT = 18
 for (let i = 0; i < BAR_COUNT; i++) waveEl.appendChild(document.createElement('span'))
 const bars = waveEl.querySelectorAll('span')
 
 let rafId
 function animateWaveform(s) {
   cancelAnimationFrame(rafId)
-  bars.forEach(b => b.style.height = '4px')
-  if (s === 'idle') return
 
   function tick() {
     const t = Date.now()
     bars.forEach((b, i) => {
       let h = 4
-      if (s === 'active') {
-        // Subtle breathing — waiting for voice
-        h = 4 + Math.abs(Math.sin(t / 1800 + i * 0.3)) * 3
+      if (s === 'idle') {
+        // Gentle breathing so the bar always feels alive
+        h = 3 + Math.abs(Math.sin(t / 2400 + i * 0.4)) * 2.5
+      } else if (s === 'active') {
+        h = 4 + Math.abs(Math.sin(t / 1600 + i * 0.32)) * 4
       } else if (s === 'listening') {
-        h = 6 + Math.abs(Math.sin(t / 110 + i * 0.75)) * 22
+        h = 6 + Math.abs(Math.sin(t / 105 + i * 0.75)) * 23
       } else if (s === 'thinking') {
-        const phase = (t / 280 + i * 0.5) % (BAR_COUNT * 0.5)
-        h = 4 + Math.max(0, 20 - Math.abs(phase - BAR_COUNT * 0.25) * 3)
+        const phase = (t / 260 + i * 0.5) % (BAR_COUNT * 0.5)
+        h = 4 + Math.max(0, 21 - Math.abs(phase - BAR_COUNT * 0.25) * 3)
       } else if (s === 'speaking') {
-        h = 5 + Math.abs(Math.sin(t / 95 + i * 0.9)) * 18
+        h = 5 + Math.abs(Math.sin(t / 92 + i * 0.9)) * 19
       } else if (s === 'running') {
-        h = i % 4 === 0 ? 4 + Math.abs(Math.sin(t / 600 + i)) * 8 : 4
+        h = i % 4 === 0 ? 4 + Math.abs(Math.sin(t / 550 + i)) * 9 : 4
+      } else if (s === 'boot') {
+        // Center-out ripple — the "AI arriving" wave
+        const center = (BAR_COUNT - 1) / 2
+        const dist = Math.abs(i - center)
+        const wave = Math.sin(t / 115 - dist * 0.55)
+        h = 6 + Math.max(0, wave) * Math.max(4, 22 - dist * 1.5)
       }
       b.style.height = h.toFixed(1) + 'px'
     })
@@ -177,41 +589,65 @@ function animateWaveform(s) {
   rafId = requestAnimationFrame(tick)
 }
 
+// ── Transcript reveal ─────────────────────────────────────────────────────────
+const transcriptEl = document.getElementById('transcript')
+let transcriptHideTimer = null
+
+function showTranscript(text) {
+  clearTimeout(transcriptHideTimer)
+  transcriptEl.innerHTML = ''
+
+  const MAX = 95
+  const clipped = text.length > MAX ? text.slice(0, MAX - 1).trimEnd() + '…' : text
+
+  const frag = document.createDocumentFragment()
+  const chars = [...clipped]
+  const perChar = Math.max(13, Math.min(34, 900 / Math.max(chars.length, 1)))
+  chars.forEach((ch, i) => {
+    const span = document.createElement('span')
+    span.className = 'ch' + (ch === ' ' ? ' sp' : '')
+    span.textContent = ch === ' ' ? ' ' : ch
+    span.style.animationDelay = (i * perChar) + 'ms'
+    frag.appendChild(span)
+  })
+  const caret = document.createElement('span')
+  caret.className = 'caret'
+  frag.appendChild(caret)
+
+  transcriptEl.appendChild(frag)
+  transcriptEl.classList.add('visible')
+  bodyClasses()
+  transcriptHideTimer = setTimeout(hideTranscript, 8000)
+}
+
+function hideTranscript() {
+  transcriptEl.classList.remove('visible')
+  clearTimeout(transcriptHideTimer)
+  transcriptHideTimer = null
+  bodyClasses()
+}
+
 // ── VAD core ──────────────────────────────────────────────────────────────────
-// audioCtx lives forever after first activation — avoids ~150ms re-creation on each toggle
-let audioCtx        = null
-let analyser        = null
-let processor       = null
-let micStream       = null
-let pcmChunks       = []
-let isRecording     = false
-let currentAudio    = null  // browser Audio element — barge-in can pause it directly
-let ttsStartedAt    = null
-let silenceTimer    = null
-let rafVAD          = null
-let speechOnsetAt   = null
-let ambientRMS      = SPEECH_THRESHOLD * 0.5  // adaptive ambient noise estimate
+let audioCtx = null, analyser = null, processor = null, micStream = null
+let pcmChunks = [], isRecording = false, currentAudio = null
+let ttsStartedAt = null, silenceTimer = null, rafVAD = null, speechOnsetAt = null
+let ambientRMS = SPEECH_THRESHOLD * 0.5
 
 async function activateVox() {
-  if (micStream) return  // already active
+  if (micStream) return
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     })
-
-    // Reuse existing context if possible — resume is near-instant vs. ~150ms for new()
     if (!audioCtx || audioCtx.state === 'closed') {
       audioCtx = new AudioContext({ sampleRate: 16000 })
     } else if (audioCtx.state === 'suspended') {
       await audioCtx.resume()
     }
-
     const source = audioCtx.createMediaStreamSource(micStream)
-
     analyser = audioCtx.createAnalyser()
     analyser.fftSize = 512
     source.connect(analyser)
-
     processor = audioCtx.createScriptProcessor(2048, 1, 1)
     processor.onaudioprocess = (e) => {
       if (isRecording && !currentAudio) {
@@ -220,7 +656,6 @@ async function activateVox() {
     }
     source.connect(processor)
     processor.connect(audioCtx.destination)
-
     setState('active')
     vadTick()
   } catch (err) {
@@ -242,7 +677,6 @@ function deactivateVox() {
   analyser = null
   micStream?.getTracks().forEach(t => t.stop())
   micStream = null
-  // Suspend (not close) audioCtx — resumes in <10ms on next activation
   audioCtx?.suspend()
   setState(agentCount > 0 ? 'running' : 'idle')
 }
@@ -259,23 +693,18 @@ function vadTick() {
   const rms = getRMS()
 
   if (currentAudio) {
-    // Barge-in: browser audio → echo cancellation works → safe to check RMS
-    // Guard 1200ms so initial transient from speakers doesn't false-trigger
     if (rms > BARGE_IN_THRESHOLD && ttsStartedAt && Date.now() - ttsStartedAt > 1200) {
       currentAudio.pause()
       currentAudio = null
       isRecording = false
       pcmChunks = []
       clearTimeout(silenceTimer); silenceTimer = null
-      window.vox.audioDone()
+      invoke('audio_done')
       setState('active')
     }
   } else if (state === 'active' || state === 'running') {
     if (!isRecording) {
-      // Adaptive threshold: requires SPEECH_SNR × ambient, floored at SPEECH_THRESHOLD.
-      // If a video is playing, ambientRMS adapts up so background speech can't trigger.
       const triggerThreshold = Math.max(SPEECH_THRESHOLD, ambientRMS * SPEECH_SNR)
-
       if (rms > triggerThreshold) {
         if (!speechOnsetAt) speechOnsetAt = Date.now()
         else if (Date.now() - speechOnsetAt > SPEECH_ONSET_MS) {
@@ -283,11 +712,11 @@ function vadTick() {
           pcmChunks = []
           speechOnsetAt = null
           clearTimeout(silenceTimer); silenceTimer = null
+          hideTranscript()
           setState('listening')
         }
       } else {
         speechOnsetAt = null
-        // Update ambient estimate only during non-speech quiet periods
         ambientRMS = ambientRMS * (1 - AMBIENT_ALPHA) + rms * AMBIENT_ALPHA
       }
     }
@@ -311,7 +740,6 @@ function sendSpeech() {
   const sampleRate = audioCtx?.sampleRate || 16000
 
   if (totalSamples < MIN_SPEECH_SAMPLES) {
-    // Too short — noise, ignore and go back to active
     pcmChunks = []
     setState(micStream ? 'active' : 'idle')
     return
@@ -322,10 +750,19 @@ function sendSpeech() {
   let off = 0; for (const c of pcmChunks) { merged.set(c, off); off += c.length }
   pcmChunks = []
 
-  window.vox.sendAudio(encodeWAV(merged, sampleRate))
+  invoke('voice_input', { wav: abToB64(encodeWAV(merged, sampleRate)) })
 }
 
-// WAV encoder (float32 PCM → WAV, no ffmpeg)
+function abToB64(buf) {
+  const u8 = new Uint8Array(buf)
+  let s = ''
+  const CH = 0x8000
+  for (let i = 0; i < u8.length; i += CH) {
+    s += String.fromCharCode.apply(null, u8.subarray(i, i + CH))
+  }
+  return btoa(s)
+}
+
 function encodeWAV(samples, sampleRate) {
   const buf = new ArrayBuffer(44 + samples.length * 2)
   const v = new DataView(buf)
@@ -343,52 +780,230 @@ function encodeWAV(samples, sampleRate) {
   return buf
 }
 
-// ── Toggle: ⌥Space active/inactive ───────────────────────────────────────────
+function interruptSpeech() {
+  if (currentAudio) {
+    try { currentAudio.pause() } catch {}
+    currentAudio = null
+  }
+  invoke('interrupt')  // stops in-flight playback + aborts a pending brief
+  setState(micStream ? 'active' : (agentCount > 0 ? 'running' : 'idle'))
+}
+
 async function toggleVox() {
+  // During the startup recap (boot) or any reply (speaking), ⌥Space stops it.
+  if (state === 'boot' || state === 'speaking') {
+    interruptSpeech()
+    return
+  }
   if (state === 'idle' || state === 'running') {
     await activateVox()
-  } else if (state !== 'thinking' && state !== 'speaking') {
+  } else if (state !== 'thinking') {
     deactivateVox()
   }
 }
 
-// ── IPC from main ─────────────────────────────────────────────────────────────
-window.vox.onToggleListen(toggleVox)
+// ── Window sizing (hover grow / settings) ────────────────────────────────────
+function syncWindow() {
+  const [w, h] = settingsOpen ? SIZE_SETTINGS : (hovered ? SIZE_HOVER : SIZE_BASE)
+  invoke('resize_window', { width: w, height: h })
+}
 
-window.vox.onSpeakingStart(() => {
+let hoverOutTimer = null
+let userDragging = false
+
+// While the user drags the pill (mousedown on a drag region), suppress
+// hover-resize — otherwise a mouseleave mid-drag teleports the window.
+document.addEventListener('mousedown', (e) => {
+  if (e.button === 0 && e.target?.hasAttribute?.('data-tauri-drag-region')) {
+    userDragging = true
+  }
+})
+document.addEventListener('mouseup', () => { userDragging = false })
+
+document.body.addEventListener('mouseenter', () => {
+  userDragging = false  // native drag swallows mouseup — reset here
+  clearTimeout(hoverOutTimer)
+  if (hovered) return
+  hovered = true
+  bodyClasses()
+  if (!settingsOpen) syncWindow()
+})
+document.body.addEventListener('mouseleave', () => {
+  if (userDragging) return
+  // Small grace period so edge-crossing doesn't flicker
+  clearTimeout(hoverOutTimer)
+  hoverOutTimer = setTimeout(() => {
+    hovered = false
+    bodyClasses()
+    if (!settingsOpen) syncWindow()
+  }, 140)
+})
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+const modelSelect = document.getElementById('model-select')
+const langSegment = document.getElementById('lang-segment')
+
+function applyUiLang() {
+  const labels = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+  document.getElementById('settings-title').textContent = labels.settingsTitle
+  document.getElementById('lbl-model').textContent = labels.model
+  document.getElementById('lbl-lang').textContent = labels.lang
+  document.getElementById('lbl-version').textContent = labels.version
+  document.getElementById('lbl-update').textContent = labels.update
+  renderUpdateBtn()
+  lastLabel = ''
+  setLabel(labels[state] || '')
+}
+
+// Update button reflects updateInfo: null → "Check", up-to-date, or "Download".
+let updateInfo = null
+const updateBtn = document.getElementById('update-btn')
+
+function renderUpdateBtn() {
+  const labels = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+  updateBtn.disabled = false
+  updateBtn.classList.remove('ok')
+  if (!updateInfo) {
+    updateBtn.textContent = labels.check
+  } else if (updateInfo.checking) {
+    updateBtn.textContent = labels.checking
+    updateBtn.disabled = true
+  } else if (updateInfo.hasUpdate) {
+    updateBtn.textContent = labels.download + ' ' + updateInfo.latest
+  } else {
+    updateBtn.textContent = labels.upToDate
+    updateBtn.classList.add('ok')
+  }
+}
+
+updateBtn.addEventListener('click', async () => {
+  if (updateInfo && updateInfo.hasUpdate && updateInfo.url) {
+    invoke('open_url', { url: updateInfo.url })
+    return
+  }
+  updateInfo = { checking: true }
+  renderUpdateBtn()
+  try {
+    updateInfo = await invoke('check_update')
+  } catch {
+    updateInfo = null
+  }
+  renderUpdateBtn()
+})
+
+async function openSettings() {
+  if (settingsOpen) return
+  settingsOpen = true
+  bodyClasses()
+  syncWindow()
+
+  const current = await invoke('get_settings')
+  uiLang = current.language || 'fr'
+  applyUiLang()
+
+  try {
+    document.getElementById('app-version').textContent = 'v' + (await invoke('get_version'))
+  } catch {}
+
+  const models = await invoke('list_models')
+  modelSelect.innerHTML = ''
+  const seen = new Set()
+  for (const name of [current.model, ...models]) {
+    if (!name || seen.has(name)) continue
+    seen.add(name)
+    const opt = document.createElement('option')
+    opt.value = name; opt.textContent = name
+    modelSelect.appendChild(opt)
+  }
+  modelSelect.value = current.model || ''
+
+  for (const btn of langSegment.querySelectorAll('button')) {
+    btn.classList.toggle('on', btn.dataset.lang === current.language)
+  }
+}
+
+function closeSettings() {
+  if (!settingsOpen) return
+  settingsOpen = false
+  bodyClasses()
+  syncWindow()
+}
+
+function toggleSettings() {
+  if (settingsOpen) closeSettings(); else openSettings()
+}
+
+document.getElementById('gear').addEventListener('click', toggleSettings)
+
+modelSelect.addEventListener('change', () => {
+  invoke('set_settings', { next: { model: modelSelect.value } })
+})
+
+langSegment.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-lang]')
+  if (!btn) return
+  for (const b of langSegment.querySelectorAll('button')) b.classList.toggle('on', b === btn)
+  uiLang = btn.dataset.lang
+  applyUiLang()
+  invoke('set_settings', { next: { language: btn.dataset.lang } })
+})
+
+// ── Events from Rust ─────────────────────────────────────────────────────────
+listen('toggle-listening', toggleVox)
+listen('toggle-settings', toggleSettings)
+
+listen('speaking-start', () => {
   ttsStartedAt = Date.now()
   setState('speaking')
 })
 
-window.vox.onSpeakingDone(() => {
+listen('speaking-done', () => {
   currentAudio = null
   setState(micStream ? 'active' : (agentCount > 0 ? 'running' : 'idle'))
+  if (transcriptEl.classList.contains('visible')) {
+    clearTimeout(transcriptHideTimer)
+    transcriptHideTimer = setTimeout(hideTranscript, 1300)
+  }
 })
 
-// Kokoro audio: played in browser so echo cancellation works for barge-in
-window.vox.onPlayWav((filePath) => {
-  currentAudio = new Audio(`file://${filePath}`)
-  currentAudio.onended = () => { currentAudio = null; window.vox.audioDone() }
-  currentAudio.onerror = () => { currentAudio = null; window.vox.audioDone() }
-  currentAudio.play().catch(() => { currentAudio = null; window.vox.audioDone() })
+// Kokoro audio: played here so echo cancellation enables barge-in
+listen('play-wav', (e) => {
+  const src = convertFileSrc(e.payload)
+  currentAudio = new Audio(src)
+  currentAudio.onended = () => { currentAudio = null; invoke('audio_done') }
+  currentAudio.onerror = () => { currentAudio = null; invoke('audio_done') }
+  currentAudio.play().catch(() => { currentAudio = null; invoke('audio_done') })
 })
 
-window.vox.onAgentStatus(({ count }) => {
-  agentCount = count
-  if (state !== 'listening' && state !== 'thinking' && state !== 'speaking' && state !== 'active') {
-    setState(count > 0 ? 'running' : 'idle')
+listen('agent-status', (e) => {
+  agentCount = e.payload.count
+  if (state !== 'listening' && state !== 'thinking' && state !== 'speaking'
+      && state !== 'active' && state !== 'boot') {
+    setState(agentCount > 0 ? 'running' : 'idle')
   } else {
     updateBadge()
   }
 })
 
-// ── Init ──────────────────────────────────────────────────────────────────────
-navigator.mediaDevices.getUserMedia({ audio: true })
-  .then(stream => { stream.getTracks().forEach(t => t.stop()); console.log('[vox] mic ok') })
-  .catch(err => console.warn('[vox] mic denied:', err.message))
+listen('transcript', (e) => {
+  if (e.payload && e.payload.trim()) showTranscript(e.payload.trim())
+})
 
-setState('idle')
-console.log('[vox renderer] ready — ⌥Space to activate, parle, silence → envoie automatiquement')
+listen('startup-brief-starting', () => {
+  setState('boot')
+})
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+;(async () => {
+  try {
+    const s = await invoke('get_settings')
+    uiLang = s.language || 'fr'
+  } catch {}
+  applyUiLang()
+  setState('idle')
+})()
+
+console.log('[vox renderer] ready — ⌥Space to talk, ⌘, or gear for settings')
 </script>
 </body>
 </html>
