@@ -3,7 +3,9 @@
 A floating voice pill for macOS that lets you talk to your [Conductor](https://conductor.build) worktrees instead of alt-tabbing between them.
 
 <p align="center">
-  <img src="docs/vox-demo.gif" alt="Vox demo" width="600">
+  <video src="docs/vox-demo.mp4" poster="docs/vox-demo-poster.jpg" controls muted loop playsinline width="600" alt="Vox demo"></video>
+  <br>
+  <em>Demo — <a href="docs/vox-demo.mp4">download the mp4</a> if the player doesn't load.</em>
 </p>
 
 ## What it does
@@ -30,7 +32,7 @@ Everything runs on your machine. No cloud calls, no API keys.
 
 - macOS 12 (Monterey) or later — built for Apple Silicon.
 - [Ollama](https://ollama.com) installed and running, with at least one model pulled.
-- Python 3.11+ for the speech daemons (installed into a dedicated `~/.vox/venv`, isolated from your system Python).
+- Python 3.11+ (used once to create `~/.vox/venv`; the speech stack installs itself into it, isolated from your system Python).
 - [Conductor](https://conductor.build) if you want the worktree recap and voice-launched agents — Vox still runs without it, it just has nothing to recap.
 - The [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) (`claude`) on your `PATH` if you want Vox to launch agents by voice.
 
@@ -43,15 +45,12 @@ Everything runs on your machine. No cloud calls, no API keys.
    ```bash
    xattr -dr com.apple.quarantine /Applications/Vox.app
    ```
-4. Set up the local speech stack (Whisper, Kokoro, Piper) into `~/.vox/venv`:
-   ```bash
-   ./scripts/install.sh
-   ```
+4. Launch Vox. On first run it **detects what's missing and auto-installs the local speech stack** (Whisper, Kokoro, Piper) into `~/.vox/venv` — a small panel shows the progress. No separate setup script. You just need Python 3.11+ and an internet connection for that first install (`scripts/install.sh` still exists as a manual fallback).
 5. Make sure Ollama has a model pulled:
    ```bash
    ollama pull qwen2.5:3b
    ```
-6. Launch Vox. Option+Space to talk.
+6. Option+Space to talk.
 
 ## Usage
 

@@ -9,6 +9,7 @@ pub mod agents;
 pub mod conductor;
 pub mod daemons;
 pub mod llm;
+pub mod setup;
 pub mod speech;
 
 use std::path::PathBuf;
@@ -230,6 +231,36 @@ async fn list_models() -> Vec<String> {
     })
     .await
     .unwrap_or_default()
+}
+
+/// First-run setup: probe the local stack (Python, venv, Whisper/Kokoro/Piper,
+/// voices, system tools). The renderer renders this as status chips.
+#[tauri::command]
+fn probe_setup() -> Value {
+    setup::probe()
+}
+
+/// Auto-install the missing speech stack into `~/.vox/venv`, streaming progress
+/// via `setup-log` events. On success, re-resolves paths and starts the
+/// daemons so the recap plays right after install.
+#[tauri::command]
+async fn run_setup(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<Value, String> {
+    let st = state.inner().clone();
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let res = setup::run_setup(&handle, &st);
+        if res.is_ok() {
+            daemons::init_paths(&st, &handle);
+            daemons::start_stt(&st);
+            daemons::start_tts(&st, handle.clone());
+        }
+        res
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -513,6 +544,8 @@ pub fn run() {
             get_settings,
             set_settings,
             list_models,
+            probe_setup,
+            run_setup,
             voice_input,
             audio_done,
             resize_window,
@@ -625,9 +658,16 @@ pub fn run() {
             std::thread::spawn(move || {
                 ensure_registry(&st.active_project.lock().unwrap().clone());
                 daemons::init_paths(&st, &handle);
-                daemons::start_stt(&st);
-                daemons::start_tts(&st, handle.clone());
-                println!("[vox] ready — Option+Space to activate, Cmd+, for settings");
+                if setup::probe().get("needsSetup").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    // Speech stack not installed yet — hold the daemons and ask
+                    // the renderer to auto-install from the setup panel.
+                    println!("[vox] local speech stack incomplete — awaiting in-app setup");
+                    let _ = handle.emit("setup-needed", setup::probe());
+                } else {
+                    daemons::start_stt(&st);
+                    daemons::start_tts(&st, handle.clone());
+                    println!("[vox] ready — Option+Space to activate, Cmd+, for settings");
+                }
             });
 
             Ok(())
