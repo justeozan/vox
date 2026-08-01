@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vox — Voice orchestrator for your coding agents</title>
+<meta name="description" content="Vox is a macOS floating voice pill that briefs you on every Conductor worktree, drafts prompts by voice, and runs 100% locally — Whisper, Ollama, Kokoro/Piper. No cloud calls.">
+<meta property="og:title" content="Vox — Voice orchestrator for your coding agents">
+<meta property="og:description" content="A floating pill that watches your Conductor worktrees, briefs you out loud, and launches the next agent. 100% local. macOS 12+, Apple Silicon, MIT.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:,">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --violet: #a78bfa;
+    --blue:   #60a5fa;
+    --green:  #4ade80;
+    --bg:     #08080b;
+    --bg-2:   #0c0c11;
+    --ink:    #f4f4f6;
+    --ink-dim: rgba(244,244,246,0.62);
+    --ink-faint: rgba(244,244,246,0.38);
+    --line:   rgba(255,255,255,0.09);
+    --card:   rgba(255,255,255,0.03);
+    --smooth: cubic-bezier(0.22, 1, 0.36, 1);
+    --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    background-image:
+      radial-gradient(ellipse 900px 500px at 18% -10%, rgba(167,139,250,0.10), transparent 60%),
+      radial-gradient(ellipse 900px 600px at 88% 8%, rgba(96,165,250,0.08), transparent 55%),
+      radial-gradient(ellipse 700px 500px at 50% 100%, rgba(74,222,128,0.06), transparent 60%);
+    color: var(--ink);
+    font-family: -apple-system, "SF Pro Text", "SF Pro Display", "Segoe UI", system-ui, ui-sans-serif, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.5;
+    overflow-x: hidden;
+  }
+
+  a { color: inherit; }
+
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* ── Nav ─────────────────────────────────────────────────────────────── */
+  header.nav {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    background: rgba(8,8,11,0.55);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .nav-inner {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: 0.01em;
+    text-decoration: none;
+  }
+  .brand-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 10px rgba(74,222,128,0.7);
+  }
+  .nav-links { display: flex; align-items: center; gap: 22px; font-size: 13.5px; }
+  .nav-links a {
+    color: var(--ink-dim);
+    text-decoration: none;
+    transition: color 0.2s ease;
+  }
+  .nav-links a:hover { color: var(--ink); }
+  .nav-cta {
+    border: 1px solid var(--line);
+    padding: 7px 14px;
+    border-radius: 9px;
+    background: rgba(255,255,255,0.04);
+    font-weight: 600;
+    transition: border-color 0.2s ease, background 0.2s ease, transform 0.15s var(--spring);
+  }
+  .nav-cta:hover { border-color: rgba(167,139,250,0.5); background: rgba(167,139,250,0.10); }
+  .nav-cta:active { transform: scale(0.96); }
+
+  @media (max-width: 640px) {
+    .nav-links a:not(.nav-cta) { display: none; }
+  }
+
+  /* ── Hero ────────────────────────────────────────────────────────────── */
+  .hero {
+    padding: 108px 24px 84px;
+    text-align: center;
+  }
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    border: 1px solid var(--line);
+    background: var(--card);
+    padding: 6px 14px;
+    border-radius: 100px;
+    margin-bottom: 28px;
+  }
+  h1.hero-title {
+    font-size: clamp(44px, 8vw, 78px);
+    font-weight: 800;
+    letter-spacing: -0.035em;
+    line-height: 1.02;
+    background: linear-gradient(180deg, #ffffff 0%, rgba(255,255,255,0.72) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 18px;
+  }
+  .hero-tagline {
+    font-size: clamp(17px, 2.6vw, 21px);
+    color: var(--ink-dim);
+    max-width: 620px;
+    margin: 0 auto 8px;
+    font-weight: 500;
+  }
+  .hero-sub {
+    font-size: 15px;
+    color: var(--ink-faint);
+    max-width: 540px;
+    margin: 0 auto 44px;
+  }
+
+  .hero-ctas {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin-bottom: 22px;
+  }
+  .btn-primary {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    background: linear-gradient(180deg, #ffffff, #e9e9ee);
+    color: #0a0a0d;
+    font-weight: 700;
+    font-size: 14.5px;
+    padding: 13px 24px;
+    border-radius: 12px;
+    text-decoration: none;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.6) inset, 0 8px 24px rgba(0,0,0,0.35);
+    transition: transform 0.18s var(--spring), box-shadow 0.25s ease;
+  }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 1px 0 rgba(255,255,255,0.6) inset, 0 12px 30px rgba(0,0,0,0.45); }
+  .btn-primary:active { transform: translateY(0) scale(0.98); }
+  .btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--line);
+    background: rgba(255,255,255,0.03);
+    color: var(--ink);
+    font-weight: 600;
+    font-size: 14.5px;
+    padding: 13px 22px;
+    border-radius: 12px;
+    text-decoration: none;
+    transition: border-color 0.2s ease, background 0.2s ease, transform 0.18s var(--spring);
+  }
+  .btn-secondary:hover { border-color: rgba(255,255,255,0.24); background: rgba(255,255,255,0.06); }
+  .btn-secondary:active { transform: scale(0.98); }
+
+  .hero-meta {
+    font-size: 12.5px;
+    color: var(--ink-faint);
+    letter-spacing: 0.02em;
+  }
+  .hero-meta .dotsep { margin: 0 8px; opacity: 0.5; }
+
+  /* ── The pill (hero visual) ──────────────────────────────────────────── */
+  .pill-stage {
+    margin: 64px auto 0;
+    display: flex;
+    justify-content: center;
+  }
+  .pill {
+    position: relative;
+    width: min(560px, 88vw);
+    height: 68px;
+    background: rgba(14,14,19,0.82);
+    border: 1px solid rgba(255,255,255,0.13);
+    border-radius: 28px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), 0 30px 70px rgba(0,0,0,0.55);
+    display: flex;
+    align-items: center;
+    padding: 0 22px;
+    gap: 14px;
+    overflow: hidden;
+    transition: border-color 0.5s ease, box-shadow 0.5s ease;
+  }
+  .pill.st-idle      { border-color: rgba(255,255,255,0.13); }
+  .pill.st-listening { border-color: rgba(74,222,128,0.55);  box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 30px rgba(74,222,128,0.28), 0 30px 70px rgba(0,0,0,0.55); }
+  .pill.st-speaking  { border-color: rgba(96,165,250,0.55);  box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 30px rgba(96,165,250,0.28), 0 30px 70px rgba(0,0,0,0.55); }
+  .pill.st-running   { border-color: rgba(167,139,250,0.5);  box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 30px rgba(167,139,250,0.26), 0 30px 70px rgba(0,0,0,0.55); }
+
+  .pill-dot-wrap { position: relative; width: 9px; height: 9px; flex-shrink: 0; }
+  .pill-dot {
+    position: absolute; inset: 0; border-radius: 50%;
+    background: #5a5a64;
+    transition: background 0.35s ease, box-shadow 0.35s ease, transform 0.35s var(--spring);
+  }
+  .pill-ring {
+    position: absolute; inset: -1px; border-radius: 50%;
+    border: 1.5px solid var(--green);
+    opacity: 0;
+  }
+  .pill.st-listening .pill-dot { background: var(--green); box-shadow: 0 0 12px rgba(74,222,128,0.75); transform: scale(1.15); }
+  .pill.st-speaking .pill-dot  { background: var(--blue);  box-shadow: 0 0 10px rgba(96,165,250,0.7); }
+  .pill.st-running .pill-dot  { background: var(--violet); box-shadow: 0 0 10px rgba(167,139,250,0.7); }
+  .pill.st-listening .pill-ring.r1 { animation: ripple 1.6s ease-out infinite; }
+  .pill.st-listening .pill-ring.r2 { animation: ripple 1.6s ease-out 0.55s infinite; }
+  .pill.st-speaking .pill-ring.r1  { border-color: var(--blue); animation: ripple 2s ease-out infinite; }
+  @keyframes ripple { 0% { opacity: 0.8; transform: scale(1); } 100% { opacity: 0; transform: scale(4); } }
+
+  .pill-wave {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex: 1;
+    height: 32px;
+    min-width: 0;
+  }
+  .pill-wave span {
+    display: block;
+    width: 3px;
+    border-radius: 2px;
+    background: rgba(255,255,255,0.22);
+    transition: background 0.4s ease;
+    height: 4px;
+  }
+  .pill.st-listening .pill-wave span { background: rgba(74,222,128,0.78); }
+  .pill.st-speaking .pill-wave span  { background: rgba(96,165,250,0.72); }
+  .pill.st-running .pill-wave span   { background: rgba(167,139,250,0.42); }
+
+  .pill-label {
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    color: rgba(255,255,255,0.4);
+    flex-shrink: 0;
+    min-width: 108px;
+    text-align: right;
+    transition: color 0.35s ease;
+    white-space: nowrap;
+  }
+  .pill.st-listening .pill-label { color: rgba(74,222,128,0.9); }
+  .pill.st-speaking .pill-label  { color: rgba(96,165,250,0.85); }
+  .pill.st-running .pill-label   { color: rgba(167,139,250,0.9); }
+
+  .pill-caption {
+    margin-top: 18px;
+    font-size: 12.5px;
+    color: var(--ink-faint);
+    text-align: center;
+    min-height: 18px;
+  }
+
+  /* ── Section shared ──────────────────────────────────────────────────── */
+  section { padding: 88px 0; }
+  .section-head { text-align: center; max-width: 620px; margin: 0 auto 52px; }
+  .section-kicker {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--violet);
+    margin-bottom: 12px;
+  }
+  .section-title {
+    font-size: clamp(26px, 4vw, 36px);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 12px;
+  }
+  .section-desc { font-size: 15px; color: var(--ink-dim); }
+
+  .reveal {
+    opacity: 0;
+    transform: translateY(18px);
+    transition: opacity 0.7s var(--smooth), transform 0.7s var(--smooth);
+  }
+  .reveal.in { opacity: 1; transform: translateY(0); }
+
+  /* ── How it feels ────────────────────────────────────────────────────── */
+  .feels {
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(255,255,255,0.015), transparent);
+  }
+  .feels-list { display: flex; flex-direction: column; gap: 0; max-width: 760px; margin: 0 auto; }
+  .feels-item {
+    display: flex;
+    gap: 18px;
+    align-items: flex-start;
+    padding: 22px 4px;
+    border-top: 1px solid var(--line);
+  }
+  .feels-item:first-child { border-top: none; }
+  .feels-mark {
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    margin-top: 2px;
+  }
+  .feels-item:nth-child(1) .feels-mark { background: rgba(74,222,128,0.14); color: var(--green); box-shadow: inset 0 0 0 1px rgba(74,222,128,0.35); }
+  .feels-item:nth-child(2) .feels-mark { background: rgba(96,165,250,0.14); color: var(--blue); box-shadow: inset 0 0 0 1px rgba(96,165,250,0.35); }
+  .feels-item:nth-child(3) .feels-mark { background: rgba(167,139,250,0.14); color: var(--violet); box-shadow: inset 0 0 0 1px rgba(167,139,250,0.35); }
+  .feels-text { font-size: 16px; color: rgba(255,255,255,0.88); line-height: 1.6; }
+  .feels-text .lang { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; color: var(--ink-faint); margin-right: 8px; vertical-align: 1px; border: 1px solid var(--line); padding: 1px 6px; border-radius: 5px; }
+
+  /* ── Features grid ───────────────────────────────────────────────────── */
+  .features-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+  @media (max-width: 860px) {
+    .features-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 600px) {
+    .features-grid { grid-template-columns: 1fr; }
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 24px 22px;
+    transition: border-color 0.25s ease, background 0.25s ease, transform 0.25s var(--smooth);
+  }
+  .card:hover {
+    border-color: rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.045);
+    transform: translateY(-2px);
+  }
+  .card-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 16px;
+  }
+  .card-icon svg { width: 17px; height: 17px; }
+  .card:nth-child(1) .card-icon, .card:nth-child(4) .card-icon { background: rgba(74,222,128,0.12); color: var(--green); box-shadow: inset 0 0 0 1px rgba(74,222,128,0.3); }
+  .card:nth-child(2) .card-icon, .card:nth-child(5) .card-icon { background: rgba(96,165,250,0.12); color: var(--blue); box-shadow: inset 0 0 0 1px rgba(96,165,250,0.3); }
+  .card:nth-child(3) .card-icon, .card:nth-child(6) .card-icon { background: rgba(167,139,250,0.12); color: var(--violet); box-shadow: inset 0 0 0 1px rgba(167,139,250,0.3); }
+  .card h3 { font-size: 15.5px; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.01em; }
+  .card p { font-size: 13.5px; color: var(--ink-dim); line-height: 1.55; }
+
+  /* ── Privacy section ─────────────────────────────────────────────────── */
+  .privacy {
+    background: var(--bg-2);
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+  }
+  .privacy-inner {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 48px;
+    align-items: center;
+  }
+  @media (max-width: 780px) {
+    .privacy-inner { grid-template-columns: 1fr; gap: 32px; }
+  }
+  .privacy-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--green);
+    margin-bottom: 16px;
+  }
+  .privacy-badge .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px rgba(74,222,128,0.8); }
+  .privacy h2 { font-size: clamp(24px, 3.4vw, 32px); font-weight: 700; letter-spacing: -0.02em; margin-bottom: 14px; }
+  .privacy p.lead { font-size: 15px; color: var(--ink-dim); margin-bottom: 0; max-width: 460px; }
+
+  .stack-list { display: flex; flex-direction: column; gap: 0; }
+  .stack-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 16px;
+    padding: 14px 0;
+    border-top: 1px solid var(--line);
+    font-size: 13.5px;
+  }
+  .stack-row:first-child { border-top: none; }
+  .stack-role { color: var(--ink-faint); }
+  .stack-name { color: var(--ink); font-weight: 600; text-align: right; }
+
+  /* ── Install steps ───────────────────────────────────────────────────── */
+  .steps {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+    counter-reset: step;
+  }
+  @media (max-width: 780px) {
+    .steps { grid-template-columns: 1fr; }
+  }
+  .step {
+    position: relative;
+    border: 1px solid var(--line);
+    background: var(--card);
+    border-radius: 16px;
+    padding: 26px 22px 22px;
+  }
+  .step-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 9px;
+    background: rgba(167,139,250,0.14);
+    box-shadow: inset 0 0 0 1px rgba(167,139,250,0.35);
+    color: var(--violet);
+    font-weight: 700;
+    font-size: 13px;
+    margin-bottom: 16px;
+  }
+  .step h3 { font-size: 15px; font-weight: 700; margin-bottom: 8px; }
+  .step p { font-size: 13.5px; color: var(--ink-dim); line-height: 1.6; }
+  .step code, .step-note code {
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.1);
+    padding: 1px 6px;
+    border-radius: 5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    color: #d9ceff;
+  }
+  .step-note {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--ink-faint);
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+  }
+
+  /* ── Final CTA ───────────────────────────────────────────────────────── */
+  .final-cta { text-align: center; }
+  .final-cta h2 { font-size: clamp(26px, 4vw, 36px); font-weight: 700; letter-spacing: -0.02em; margin-bottom: 14px; }
+  .final-cta p { font-size: 15px; color: var(--ink-dim); margin-bottom: 32px; }
+
+  /* ── Footer ──────────────────────────────────────────────────────────── */
+  footer {
+    border-top: 1px solid var(--line);
+    padding: 36px 0 48px;
+  }
+  .footer-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  .footer-left { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink-faint); }
+  .footer-links { display: flex; gap: 20px; font-size: 13px; }
+  .footer-links a { color: var(--ink-dim); text-decoration: none; transition: color 0.2s ease; }
+  .footer-links a:hover { color: var(--ink); }
+  .icon-github { width: 16px; height: 16px; flex-shrink: 0; }
+
+  @media (max-width: 500px) {
+    .footer-inner { flex-direction: column; align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="nav-inner">
+    <a href="#top" class="brand"><span class="brand-dot"></span>Vox</a>
+    <nav class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#privacy">Privacy</a>
+      <a href="#install">Install</a>
+      <a class="nav-cta" href="https://github.com/justeozan/vox/releases/latest">Download</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ── Hero ─────────────────────────────────────────────────────────── -->
+  <section class="hero">
+    <div class="wrap">
+      <span class="eyebrow">v0.3.0 · streaming TTS, live carousel</span>
+      <h1 class="hero-title">Vox</h1>
+      <p class="hero-tagline">Voice orchestrator for your coding agents.</p>
+      <p class="hero-sub">A floating pill that watches your Conductor worktrees, briefs you out loud, and drafts the next prompt — hands-free, entirely on your Mac.</p>
+
+      <div class="hero-ctas">
+        <a class="btn-primary" href="https://github.com/justeozan/vox/releases/latest">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13"/><path d="M7 11l5 5 5-5"/><path d="M5 21h14"/></svg>
+          Download for macOS
+        </a>
+        <a class="btn-secondary" href="https://github.com/justeozan/vox">
+          <svg class="icon-github" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+          View on GitHub
+        </a>
+      </div>
+
+      <p class="hero-meta">macOS 12+ <span class="dotsep">·</span> Apple Silicon <span class="dotsep">·</span> MIT</p>
+
+      <div class="pill-stage">
+        <div>
+          <div class="pill st-idle" id="hero-pill">
+            <div class="pill-dot-wrap">
+              <div class="pill-dot" id="pill-dot"></div>
+              <span class="pill-ring r1"></span>
+              <span class="pill-ring r2"></span>
+            </div>
+            <div class="pill-wave" id="pill-wave"></div>
+            <div class="pill-label" id="pill-label">⌥ space</div>
+          </div>
+          <div class="pill-caption" id="pill-caption">Option + Space to talk. Vox listens, thinks, and answers out loud.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── How it feels ─────────────────────────────────────────────────── -->
+  <section class="feels reveal">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-kicker">How it feels</div>
+        <h2 class="section-title">You talk. It orchestrates.</h2>
+      </div>
+      <div class="feels-list">
+        <div class="feels-item">
+          <div class="feels-mark">1</div>
+          <div class="feels-text"><span class="lang">FR</span>« Trois worktrees actifs, un agent bloqué sur les tests d'auth depuis dix minutes — je le relance ? »</div>
+        </div>
+        <div class="feels-item">
+          <div class="feels-mark">2</div>
+          <div class="feels-text"><span class="lang">EN</span>You say what needs doing. Vox drafts the detailed prompt from the conversation and launches Claude Code on the right worktree.</div>
+        </div>
+        <div class="feels-item">
+          <div class="feels-mark">3</div>
+          <div class="feels-text"><span class="lang">FR/EN</span>No robotic roll call. Quiet worktrees get grouped, phrasing varies every time — <em>« et sinon, rien de neuf côté billing »</em> — like a teammate, not a cron job.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Features ─────────────────────────────────────────────────────── -->
+  <section id="features" class="reveal">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-kicker">What it does</div>
+        <h2 class="section-title">Built to sit next to Conductor, not replace it</h2>
+        <p class="section-desc">Vox reads the state of your worktrees and gives you a voice interface to act on it.</p>
+      </div>
+      <div class="features-grid">
+        <div class="card">
+          <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9"/><path d="M3 3v6h6"/><path d="M12 7v5l3 3"/></svg></div>
+          <h3>Full worktree recap on launch</h3>
+          <p>Reads Conductor's SQLite DB read-only and speaks a recap of every active worktree: who's working, who's idle or errored, and what each agent last said.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M8 22h8"/><rect x="7" y="2" width="10" height="14" rx="5"/><path d="M5 11a7 7 0 0 0 14 0"/></svg></div>
+          <h3>Voice-drafted prompts</h3>
+          <p>Describe what needs doing. Vox turns the conversation into a detailed prompt and launches a Claude Code agent on the worktree you mean.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h3l2-7 4 14 2-7h5"/></svg></div>
+          <h3>Streaming replies</h3>
+          <p>New in v0.3.0: Vox starts speaking while the model is still generating, so a recap or an answer never feels like it's loading.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3 8-8"/><path d="M21 12a9 9 0 1 1-4.4-7.7"/></svg></div>
+          <h3>Real progress advice</h3>
+          <p>Vox compares what an agent shipped against your original ask, tells you if it's on track, and proposes the next prompt to send.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M18.5 8.5a7 7 0 0 1 0 7"/><path d="M5.5 8.5a7 7 0 0 0 0 7"/><circle cx="12" cy="12" r="1.6"/></svg></div>
+          <h3>Bilingual, end to end</h3>
+          <p>Français and English throughout — STT, brain, and TTS. A pronunciation dictionary at <code>~/.vox/pronunciations.json</code> fixes the words it mangles.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
+          <h3>100% local</h3>
+          <p>Whisper, Ollama, Kokoro/Piper — everything runs on your Mac. No API keys, no cloud calls, nothing leaves your machine.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Privacy / local stack ────────────────────────────────────────── -->
+  <section id="privacy" class="privacy reveal">
+    <div class="wrap">
+      <div class="privacy-inner">
+        <div>
+          <div class="privacy-badge"><span class="dot"></span>Private by construction</div>
+          <h2>Nothing you say leaves your Mac.</h2>
+          <p class="lead">No accounts, no telemetry, no API keys to paste in. Vox runs a small local stack and talks to Ollama on localhost — that's the entire network surface.</p>
+        </div>
+        <div class="stack-list">
+          <div class="stack-row"><span class="stack-role">Speech-to-text</span><span class="stack-name">Whisper (local Python daemon)</span></div>
+          <div class="stack-row"><span class="stack-role">Reasoning</span><span class="stack-name">Ollama — any model, default qwen2.5:3b</span></div>
+          <div class="stack-row"><span class="stack-role">Voice — English</span><span class="stack-name">Kokoro TTS</span></div>
+          <div class="stack-row"><span class="stack-role">Voice — French</span><span class="stack-name">Piper TTS</span></div>
+          <div class="stack-row"><span class="stack-role">Fallback voice</span><span class="stack-name">macOS <code>say</code></span></div>
+          <div class="stack-row"><span class="stack-role">Worktree data</span><span class="stack-name">Conductor's SQLite DB, read-only</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Install ──────────────────────────────────────────────────────── -->
+  <section id="install" class="reveal">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="section-kicker">Get started</div>
+        <h2 class="section-title">Three steps, all local</h2>
+      </div>
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <h3>Download &amp; open</h3>
+          <p>Grab the <code>.dmg</code> from GitHub Releases. It's ad-hoc signed, not notarized — the first launch, right-click the app and choose <strong>Open</strong> to get past Gatekeeper.</p>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <h3>Run the installer</h3>
+          <p>Run <code>scripts/install.sh</code> once. It sets up <code>~/.vox/venv</code> with the Whisper, Kokoro, and Piper Python dependencies.</p>
+          <div class="step-note">Config lives in <code>~/.vox/settings.json</code> and <code>~/.vox/projects.json</code>.</div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <h3>Install Ollama, pull a model</h3>
+          <p>Install Ollama and run <code>ollama pull qwen2.5:3b</code> (or any model you prefer). Launch Vox, hit <code>⌥ Space</code>, and start talking.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Final CTA ────────────────────────────────────────────────────── -->
+  <section class="final-cta reveal">
+    <div class="wrap">
+      <h2>Stop context-switching between terminals.</h2>
+      <p>One pill, every worktree, your voice.</p>
+      <a class="btn-primary" href="https://github.com/justeozan/vox/releases/latest">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13"/><path d="M7 11l5 5 5-5"/><path d="M5 21h14"/></svg>
+        Download Vox
+      </a>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap footer-inner">
+    <div class="footer-left">
+      <svg class="icon-github" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+      <span>github.com/justeozan/vox · MIT License</span>
+    </div>
+    <div class="footer-links">
+      <a href="https://github.com/justeozan/vox">Repository</a>
+      <a href="https://github.com/justeozan/vox/releases/latest">Releases</a>
+      <a href="https://github.com/justeozan/vox/blob/main/LICENSE">License</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // ── Hero pill: cycles through the real Vox states so the visual isn't static.
+  (function () {
+    var pill = document.getElementById('hero-pill');
+    var wave = document.getElementById('pill-wave');
+    var label = document.getElementById('pill-label');
+    var caption = document.getElementById('pill-caption');
+    var BARS = 18;
+    for (var i = 0; i < BARS; i++) wave.appendChild(document.createElement('span'));
+    var bars = wave.querySelectorAll('span');
+
+    var STATES = [
+      { cls: 'st-idle',      label: '⌥ space',        caption: 'Option + Space to talk. Vox listens, thinks, and answers out loud.', dur: 2600 },
+      { cls: 'st-listening', label: 'listening…',      caption: '"Where\'s the auth worktree at?"', dur: 3000 },
+      { cls: 'st-speaking',  label: 'replying…',       caption: 'Streaming TTS — Vox answers as it thinks, not after.', dur: 3000 },
+      { cls: 'st-running',   label: '3 agents active', caption: 'Live recap of every Conductor worktree, grouped and varied.', dur: 3000 }
+    ];
+    var idx = 0;
+
+    function applyState(s) {
+      pill.className = 'pill ' + s.cls;
+      label.textContent = s.label;
+      caption.textContent = s.caption;
+    }
+
+    function tick() {
+      var t = Date.now();
+      var s = STATES[idx].cls;
+      bars.forEach(function (b, i) {
+        var h = 4;
+        if (s === 'st-idle') {
+          h = 3 + Math.abs(Math.sin(t / 2400 + i * 0.4)) * 2.5;
+        } else if (s === 'st-listening') {
+          h = 6 + Math.abs(Math.sin(t / 130 + i * 0.75)) * 21;
+        } else if (s === 'st-speaking') {
+          h = 5 + Math.abs(Math.sin(t / 110 + i * 0.9)) * 18;
+        } else if (s === 'st-running') {
+          h = i % 4 === 0 ? 4 + Math.abs(Math.sin(t / 550 + i)) * 9 : 4;
+        }
+        b.style.height = h.toFixed(1) + 'px';
+      });
+      requestAnimationFrame(tick);
+    }
+
+    function advance() {
+      applyState(STATES[idx]);
+      setTimeout(function () {
+        idx = (idx + 1) % STATES.length;
+        advance();
+      }, STATES[idx].dur);
+    }
+
+    var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    applyState(STATES[0]);
+    if (!reduceMotion) {
+      requestAnimationFrame(tick);
+      setTimeout(function () { idx = 1; advance(); }, STATES[0].dur);
+    }
+  })();
+
+  // ── Scroll reveal ──────────────────────────────────────────────────────
+  (function () {
+    var targets = document.querySelectorAll('.reveal');
+    if (!('IntersectionObserver' in window)) {
+      targets.forEach(function (el) { el.classList.add('in'); });
+      return;
+    }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('in');
+          io.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+    targets.forEach(function (el) { io.observe(el); });
+  })();
+</script>
+
+</body>
+</html>

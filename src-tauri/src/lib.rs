@@ -130,13 +130,21 @@ pub struct AppState {
     pub history: Mutex<Vec<Value>>,
     pub stt: Mutex<Option<daemons::DaemonHandle>>,
     pub tts: Mutex<Option<daemons::DaemonHandle>>,
-    pub audio_done: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    /// (play id, done sender) for the sentence currently playing. The id lets
+    /// audio_done ignore stale acks — a failed Audio load can fire twice
+    /// (onerror + play().catch), and a duplicate ack must not consume the
+    /// NEXT sentence's sender.
+    pub audio_done: Mutex<Option<(u64, std::sync::mpsc::Sender<()>)>>,
+    /// Monotonic id source for play-wav events.
+    pub play_id: AtomicU64,
     pub agent_count: AtomicI64,
     pub active_project: Mutex<String>,
     pub startup_brief_done: AtomicBool,
-    /// Set by the `interrupt` command (⌥Space during the recap) so the
-    /// startup brief aborts before/while speaking.
-    pub interrupt: AtomicBool,
+    /// Interrupt GENERATION — bumped by the `interrupt` command (⌥Space /
+    /// barge-in). Sessions capture the value at creation and treat any later
+    /// mismatch as "cancelled". A counter (not a bool) so an old interrupt can
+    /// never be un-armed by a later turn and resurrect a killed session.
+    pub interrupt_gen: AtomicU64,
     pub anim_gen: AtomicU64,
     pub paths: Mutex<Paths>,
     pub speak_lock: Mutex<()>,
@@ -268,6 +276,11 @@ async fn voice_input(
 ) -> Result<(), String> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // NOTE: no interrupt reset here. Interruption is generation-based —
+        // new sessions capture the current generation and are unaffected by
+        // past interrupts, while a killed recap stays killed even if the user
+        // immediately asks something (clearing a global flag here used to
+        // resurrect the aborted recap's advice stream).
         use base64::Engine;
         let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&wav) else {
             let _ = app.emit("speaking-done", ());
@@ -295,21 +308,22 @@ async fn voice_input(
         // Renderer reveals this letter by letter.
         let _ = app.emit("transcript", &transcript);
 
-        let reply = llm::ask_ollama(&app, &st, &transcript);
-        if reply.is_empty() {
-            let _ = app.emit("speaking-done", ());
-        } else {
-            speech::speak(&app, &st, &reply);
-        }
+        // Streams the reply to TTS as it generates and guarantees a
+        // speaking-done on every path.
+        llm::ask_ollama(&app, &st, &transcript);
     })
     .await
     .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn audio_done(state: tauri::State<'_, Arc<AppState>>) {
-    if let Some(tx) = state.audio_done.lock().unwrap().take() {
-        let _ = tx.send(());
+fn audio_done(state: tauri::State<'_, Arc<AppState>>, id: u64) {
+    let mut guard = state.audio_done.lock().unwrap();
+    // Only honor the ack for the sentence that's actually playing.
+    if guard.as_ref().is_some_and(|(cur, _)| *cur == id) {
+        if let Some((_, tx)) = guard.take() {
+            let _ = tx.send(());
+        }
     }
 }
 
@@ -325,15 +339,33 @@ fn resize_window(
     std::thread::spawn(move || animate_frame(window, st, gen, width, height));
 }
 
-/// Interrupt whatever Vox is currently saying — used by ⌥Space during the
-/// startup recap. Stops in-flight playback and aborts a brief that hasn't
-/// started speaking yet.
+/// Interrupt whatever Vox is currently saying — ⌥Space or barge-in. Bumps the
+/// interrupt generation (cancelling every session/brief created before this
+/// moment, permanently) and unblocks the current playback wait.
 #[tauri::command]
 fn interrupt(state: tauri::State<'_, Arc<AppState>>) {
-    state.interrupt.store(true, Ordering::SeqCst);
-    if let Some(tx) = state.audio_done.lock().unwrap().take() {
+    state.interrupt_gen.fetch_add(1, Ordering::SeqCst);
+    if let Some((_, tx)) = state.audio_done.lock().unwrap().take() {
         let _ = tx.send(());
     }
+}
+
+/// Re-run the worktree recap on demand (recap button next to the gear).
+#[tauri::command]
+fn replay_recap(app: AppHandle, state: tauri::State<'_, Arc<AppState>>) {
+    let st = state.inner().clone();
+    std::thread::spawn(move || {
+        st.startup_brief_done.store(false, Ordering::SeqCst);
+        if !conductor::speak_startup_brief(&app, &st) {
+            // A button press deserves a reply even when there's nothing.
+            let en = st.settings.lock().unwrap().language == "en";
+            speech::speak(
+                &app,
+                &st,
+                if en { "No active worktree to report." } else { "Aucun worktree actif à signaler." },
+            );
+        }
+    });
 }
 
 // ── Version & updates ─────────────────────────────────────────────────────────
@@ -440,10 +472,11 @@ pub fn run() {
         stt: Mutex::new(None),
         tts: Mutex::new(None),
         audio_done: Mutex::new(None),
+        play_id: AtomicU64::new(0),
         agent_count: AtomicI64::new(0),
         active_project: Mutex::new(active_project),
         startup_brief_done: AtomicBool::new(false),
-        interrupt: AtomicBool::new(false),
+        interrupt_gen: AtomicU64::new(0),
         anim_gen: AtomicU64::new(0),
         paths: Mutex::new(Paths {
             stt_script: None,
@@ -484,6 +517,7 @@ pub fn run() {
             audio_done,
             resize_window,
             interrupt,
+            replay_recap,
             get_version,
             check_update,
             open_url,
