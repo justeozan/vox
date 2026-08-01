@@ -2,7 +2,7 @@
 
 A floating voice pill for macOS that lets you talk to your [Conductor](https://conductor.build) worktrees instead of alt-tabbing between them.
 
-<!-- ![demo](docs/demo.gif) -->
+![Vox demo](docs/vox-demo.gif)
 
 ## What it does
 
