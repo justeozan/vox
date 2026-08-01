@@ -1,16 +1,19 @@
-//! Conductor workspace state — port of conductor-state.js. Queries the app's
-//! SQLite DB read-only via the system `sqlite3` CLI (no bundled sqlite dep),
-//! then builds the deterministic startup-brief sentences.
+//! Conductor workspace state — queries the app's SQLite DB read-only via the
+//! system `sqlite3` CLI (no bundled sqlite dep), then builds the startup-brief
+//! sentences: deterministic per-worktree lines (varied phrasing, quiet repos
+//! grouped) streamed into a speech session, followed by an LLM recommendation
+//! grounded in each worktree's ORIGINAL ask.
 
 use std::process::Command;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
+use crate::speech::SpeechItem;
 use crate::{home, AppState};
 
 pub struct SessionInfo {
@@ -18,10 +21,15 @@ pub struct SessionInfo {
     pub status: String,
     pub unread_count: i64,
     pub preview: Option<String>,
+    /// The user's first message in the session — what this worktree was
+    /// originally asked to do. Grounds progress advice.
+    pub original_ask: Option<String>,
 }
 
 pub struct Workspace {
     pub project: String,
+    pub branch: String,
+    pub path: String,
     pub session: Option<SessionInfo>,
 }
 
@@ -44,7 +52,7 @@ fn s(v: &Value, key: &str) -> String {
 }
 
 // Assistant messages are JSON envelopes that differ by agent type — extract
-// the last human-meaningful text (see conductor-state.js for the format zoo).
+// the last human-meaningful text.
 fn extract_last_assistant_text(raw: &str) -> Option<String> {
     match serde_json::from_str::<Value>(raw) {
         Ok(obj) => {
@@ -101,9 +109,37 @@ fn last_assistant_message(session_id: &str) -> Option<String> {
         .find_map(|row| extract_last_assistant_text(&s(row, "content")))
 }
 
+/// The session's original ask: first meaningful user message.
+fn first_user_message(session_id: &str) -> Option<String> {
+    let rows = sql(&format!(
+        "SELECT content FROM session_messages \
+         WHERE session_id='{session_id}' AND role='user' \
+         ORDER BY sent_at ASC LIMIT 3;"
+    ));
+    rows.iter().find_map(|row| {
+        let raw = s(row, "content");
+        let text = match serde_json::from_str::<Value>(&raw) {
+            Ok(v) => v
+                .get("content")
+                .and_then(|c| c.as_str())
+                .or_else(|| v.get("text").and_then(|c| c.as_str()))
+                .or_else(|| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| raw.clone()),
+            Err(_) => raw.clone(),
+        };
+        let t = clean_snippet(&text);
+        if t.chars().count() > 3 {
+            Some(t.chars().take(150).collect())
+        } else {
+            None
+        }
+    })
+}
+
 pub fn read_state(max_items: usize) -> Vec<Workspace> {
     let workspaces = sql(&format!(
-        "SELECT w.id, w.branch, w.workspace_name, r.name AS project_name, \
+        "SELECT w.id, w.branch, w.workspace_name, w.workspace_path, r.name AS project_name, \
            (SELECT s.id FROM sessions s \
              WHERE s.workspace_id = w.id AND s.is_hidden = 0 \
              ORDER BY s.updated_at DESC LIMIT 1) AS session_id \
@@ -129,11 +165,39 @@ pub fn read_state(max_items: usize) -> Vec<Workspace> {
                     status: s(row, "status"),
                     unread_count: row.get("unread_count").and_then(|v| v.as_i64()).unwrap_or(0),
                     preview: last_assistant_message(&session_id),
+                    original_ask: first_user_message(&session_id),
                 })
             };
-            Workspace { project: s(w, "project_name"), session }
+            Workspace {
+                project: s(w, "project_name"),
+                branch: s(w, "branch"),
+                path: s(w, "workspace_path"),
+                session,
+            }
         })
         .collect()
+}
+
+/// Resolve a spoken worktree/project name to its filesystem path. Matches the
+/// repo name, directory name, workspace name, or branch, most recent first.
+pub fn find_workspace_path(name: &str) -> Option<String> {
+    let needle = name.trim().to_lowercase().replace('\'', "''");
+    if needle.is_empty() || needle.chars().count() > 80 {
+        return None;
+    }
+    let rows = sql(&format!(
+        "SELECT w.workspace_path FROM workspaces w \
+         LEFT JOIN repos r ON w.repository_id = r.id \
+         WHERE w.state = 'ready' AND w.workspace_path IS NOT NULL AND ( \
+            lower(r.name) = '{needle}' \
+            OR lower(w.directory_name) = '{needle}' \
+            OR lower(w.workspace_name) = '{needle}' \
+            OR lower(w.branch) LIKE '%{needle}%') \
+         ORDER BY w.updated_at DESC LIMIT 1;"
+    ));
+    rows.first()
+        .map(|r| s(r, "workspace_path"))
+        .filter(|p| !p.is_empty() && std::path::Path::new(p).exists())
 }
 
 // ── Snippet cleaning (port of cleanActivitySnippet) ──────────────────────────
@@ -159,62 +223,122 @@ pub fn clean_snippet(raw: &str) -> String {
     t.chars().take(80).collect::<String>().trim().to_string()
 }
 
-// Turn one workspace into a spoken sentence. Deterministic — no LLM involved,
-// so it cannot hallucinate a project name or invent a status. Language-aware:
-// in English mode we don't quote the (often French) agent preview, so the
-// recap stays fully English instead of code-switching mid-sentence.
-fn workspace_sentence(w: &Workspace, en: bool) -> Option<String> {
-    let s = w.session.as_ref()?;
-    let preview = s.preview.as_deref().map(clean_snippet).unwrap_or_default();
-    let looks_like_question = preview.ends_with('?')
-        || Regex::new(r"(?i)\b(peux|veux|est-ce|c'est quoi|comment|dois-je|can|should|which|what)\b")
-            .unwrap()
-            .is_match(&preview);
+// ── Brief sentences — varied phrasing, quiet repos grouped ───────────────────
 
-    match s.status.as_str() {
-        "working" => Some(if en {
-            format!("Agent {} is still working on {}.", s.agent, w.project)
-        } else {
-            format!("L'agent {} bosse encore sur {}.", s.agent, w.project)
-        }),
-        "error" => {
-            let detail = Regex::new(r"^\[erreur\]\s*")
-                .unwrap()
-                .replace(&preview, "")
-                .to_string();
-            if en {
-                Some(format!("There's an error on {}.", w.project))
-            } else {
-                let detail = if detail.is_empty() { "agent en échec".into() } else { detail };
-                Some(format!("Il y a une erreur sur {}, {detail}.", w.project))
-            }
+fn join_names(names: &[String], en: bool) -> String {
+    let and = if en { "and" } else { "et" };
+    match names.len() {
+        0 => String::new(),
+        1 => names[0].clone(),
+        2 => format!("{} {and} {}", names[0], names[1]),
+        _ if names.len() <= 4 => {
+            let (head, last) = names.split_at(names.len() - 1);
+            format!("{} {and} {}", head.join(", "), last[0])
         }
-        "idle" => {
-            if looks_like_question && !preview.is_empty() {
-                Some(if en {
-                    format!("{} is waiting for your answer.", w.project)
-                } else {
-                    format!("{} attend ta réponse : {preview}", w.project)
-                })
-            } else if s.unread_count > 0 {
-                Some(if en {
-                    format!("The agent on {} is done — you'll need to test it.", w.project)
-                } else {
-                    format!("L'agent sur {} a terminé, il te faudra tester.", w.project)
-                })
-            } else if !preview.is_empty() {
-                Some(if en {
-                    format!("{} looks good, up to you whether to keep going.", w.project)
-                } else {
-                    format!("Tout est bon sur {}, à toi de voir si tu veux enchaîner.", w.project)
-                })
-            } else {
-                None
-            }
+        n => {
+            let others = if en { "others" } else { "autres" };
+            format!("{}, {} {and} {} {others}", names[0], names[1], n - 2)
         }
-        _ => None,
     }
 }
+
+/// Build the deterministic recap sentences, each tagged with the workspace it
+/// talks about. `seed` rotates the phrasing between runs so consecutive
+/// recaps don't sound copy-pasted; quiet worktrees collapse into ONE sentence.
+fn build_brief_sentences(ws: &[Workspace], en: bool, seed: usize) -> Vec<(String, Option<String>)> {
+    let mut out: Vec<(String, Option<String>)> = Vec::new();
+    let mut quiet: Vec<String> = Vec::new();
+
+    for (i, w) in ws.iter().enumerate() {
+        let Some(sess) = w.session.as_ref() else { continue };
+        let p = &w.project;
+        let a = &sess.agent;
+        let preview = sess.preview.as_deref().map(clean_snippet).unwrap_or_default();
+        let looks_like_question = preview.ends_with('?')
+            || Regex::new(r"(?i)\b(peux|veux|est-ce|c'est quoi|comment|dois-je|can|should|which|what)\b")
+                .unwrap()
+                .is_match(&preview);
+        let v = seed + i;
+
+        let sentence = match sess.status.as_str() {
+            "working" => Some(match v % 3 {
+                0 if en => format!("Agent {a} is still working on {p}."),
+                1 if en => format!("{p}: agent {a} is on it right now."),
+                _ if en => format!("Work is moving on {p} with agent {a}."),
+                0 => format!("L'agent {a} bosse encore sur {p}."),
+                1 => format!("{p} : l'agent {a} est toujours au travail."),
+                _ => format!("Ça avance sur {p}, l'agent {a} est dessus."),
+            }),
+            "error" => {
+                let detail = Regex::new(r"^\[erreur\]\s*")
+                    .unwrap()
+                    .replace(&preview, "")
+                    .to_string();
+                Some(match v % 3 {
+                    0 if en => format!("There's an error on {p}."),
+                    1 if en => format!("Heads up — {p} errored out."),
+                    _ if en => format!("{p} hit a problem."),
+                    0 => {
+                        let d = if detail.is_empty() { "agent en échec".into() } else { detail };
+                        format!("Il y a une erreur sur {p}, {d}.")
+                    }
+                    1 => format!("Attention, {p} est en erreur."),
+                    _ => format!("{p} a un souci, jette un œil."),
+                })
+            }
+            "idle" => {
+                if looks_like_question && !preview.is_empty() {
+                    Some(match v % 3 {
+                        0 if en => format!("{p} is waiting for your answer."),
+                        1 if en => format!("The agent on {p} asked you something."),
+                        _ if en => format!("There's a pending question on {p}."),
+                        0 => format!("{p} attend ta réponse : {preview}"),
+                        1 => format!("L'agent de {p} te pose une question : {preview}"),
+                        _ => format!("Question en attente sur {p} : {preview}"),
+                    })
+                } else if sess.unread_count > 0 {
+                    Some(match v % 3 {
+                        0 if en => format!("The agent on {p} is done — you'll need to test it."),
+                        1 if en => format!("{p} is ready for you to try."),
+                        _ if en => format!("{p} finished; give it a quick test."),
+                        0 => format!("L'agent sur {p} a terminé, il te faudra tester."),
+                        1 => format!("{p} est prêt, à tester quand tu veux."),
+                        _ => format!("C'est terminé sur {p}, un petit test s'impose."),
+                    })
+                } else {
+                    // Nothing actionable — collapse into the grouped sentence.
+                    quiet.push(p.clone());
+                    None
+                }
+            }
+            _ => {
+                quiet.push(p.clone());
+                None
+            }
+        };
+        if let Some(text) = sentence {
+            out.push((text, Some(p.clone())));
+        }
+    }
+
+    if !quiet.is_empty() {
+        let list = join_names(&quiet, en);
+        let text = match seed % 3 {
+            0 if en => format!("Nothing new on {list}."),
+            1 if en => format!("All quiet on {list}."),
+            _ if en => format!("{list}: nothing to report."),
+            0 => format!("Rien de nouveau sur {list}."),
+            1 => format!("Toujours calme côté {list}."),
+            _ => format!("{list} : rien à signaler."),
+        };
+        // Tag with the first quiet project so the carousel still tracks.
+        out.push((text, quiet.first().cloned()));
+    }
+
+    out
+}
+
+// ── Startup brief ────────────────────────────────────────────────────────────
 
 pub fn speak_startup_brief(app: &AppHandle, state: &Arc<AppState>) {
     if state.startup_brief_done.swap(true, Ordering::SeqCst) {
@@ -228,91 +352,108 @@ pub fn speak_startup_brief(app: &AppHandle, state: &Arc<AppState>) {
     if ws.is_empty() {
         return;
     }
-    let sentences: Vec<String> = ws.iter().filter_map(|w| workspace_sentence(w, en)).collect();
+    let seed = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) / 60) as usize;
+    let sentences = build_brief_sentences(&ws, en, seed);
     if sentences.is_empty() {
         return;
     }
 
-    // Show the violet "awakening" visual NOW, while we prepare the recap —
-    // the LLM recommendation below can take a couple of seconds, and the boot
-    // state used to only appear right before the first spoken word.
+    // Carousel cards for the renderer — sent before anything is spoken.
+    let cards: Vec<Value> = ws
+        .iter()
+        .map(|w| {
+            json!({
+                "project": w.project,
+                "branch": w.branch,
+                "agent": w.session.as_ref().map(|s| s.agent.clone()).unwrap_or_default(),
+                "status": w.session.as_ref().map(|s| s.status.clone()).unwrap_or_else(|| "none".into()),
+                "unread": w.session.as_ref().map(|s| s.unread_count).unwrap_or(0),
+                "preview": w.session.as_ref().and_then(|s| s.preview.as_deref()).map(clean_snippet).unwrap_or_default(),
+            })
+        })
+        .collect();
+    let _ = app.emit("workspaces-data", json!(cards));
+
+    // Violet "awakening" visual immediately — speech streams in behind it.
     let _ = app.emit("startup-brief-starting", ());
-    if aborted(app, state) {
+
+    let interrupted = || state.interrupt.load(Ordering::SeqCst);
+    if interrupted() {
+        let _ = app.emit("speaking-done", ());
         return;
     }
 
-    // The per-worktree part is deterministic. Ask the LLM only for a single
-    // closing recommendation — small surface, low hallucination risk.
-    let model = state.settings.lock().unwrap().model.clone();
-    let feed = ws
-        .iter()
-        .map(|w| match &w.session {
-            Some(s) => format!(
-                "- {} ({}, {}{})",
-                w.project,
-                s.agent,
-                s.status,
-                if s.unread_count > 0 {
+    // Everything below streams into one speech session: the deterministic
+    // sentences start playing right away while the LLM writes its advice.
+    let session = crate::speech::start_session(app.clone(), state.clone());
+
+    let intro = match seed % 3 {
+        0 if en => "Hey, here's the recap.",
+        1 if en => "Quick status round-up.",
+        _ if en => "Here's where things stand.",
+        0 => "Bonjour, voici le récap.",
+        1 => "Salut ! Petit point sur tes worktrees.",
+        _ => "C'est parti pour le récap.",
+    };
+    let _ = session.send(SpeechItem::Sentence { text: intro.into(), workspace: None });
+
+    for (text, workspace) in sentences {
+        if interrupted() {
+            break;
+        }
+        let _ = session.send(SpeechItem::Sentence { text, workspace });
+    }
+
+    // LLM advice grounded in each worktree's original ask — streamed sentence
+    // by sentence into the same session while earlier lines are being spoken.
+    if !interrupted() {
+        let model = state.settings.lock().unwrap().model.clone();
+        let feed = ws
+            .iter()
+            .filter_map(|w| {
+                let sess = w.session.as_ref()?;
+                let ask = sess.original_ask.as_deref().unwrap_or("?");
+                let last = sess.preview.as_deref().map(clean_snippet).unwrap_or_default();
+                let unread = if sess.unread_count > 0 {
                     if en { ", unread" } else { ", non lu" }
                 } else {
                     ""
-                }
-            ),
-            None => format!("- {} (?, ?)", w.project),
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+                };
+                Some(format!(
+                    "- {} ({}{unread}) | {} \"{ask}\" | {} \"{last}\"",
+                    w.project,
+                    sess.status,
+                    if en { "asked:" } else { "demande :" },
+                    if en { "last:" } else { "dernier :" },
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
-    let (system, user) = if en {
-        (
-            "You are Vox. Reply in ONE short spoken English sentence. \
-             Your only job: recommend WHICH project from the list below the user should focus on now, and why in 5 words max. \
-             Never invent a project that isn't in the list. Priority: errors first, then pending questions, then results to test. \
-             Example: \"I'd start with findy, there's an opencode error.\"",
-            format!("Projects:\n{feed}\n\nRecommendation?"),
-        )
-    } else {
-        (
-            "Tu es Vox. Tu réponds en UNE seule phrase courte en français oral. \
-             Ton unique job : recommander sur QUEL projet de la liste ci-dessous l'utilisateur devrait se concentrer maintenant, et pourquoi en 5 mots max. \
-             Interdiction absolue d'inventer un projet qui n'est pas dans la liste. Priorité aux erreurs, puis aux questions en attente, puis aux résultats à tester. \
-             Exemple : \"Je te conseille de commencer par findy, y a une erreur opencode.\"",
-            format!("Projets :\n{feed}\n\nRecommandation ?"),
-        )
-    };
+        let system = if en {
+            "You are Vox, spoken English. From the data: 1) Recommend WHICH worktree to handle first and why, one short sentence. \
+             2) If a finished worktree seems to satisfy its original ask, propose the next step in one sentence starting with \"I can prompt <project> to …\". \
+             Max 3 short sentences total. Never invent a project not in the list."
+        } else {
+            "Tu es Vox, français oral. À partir des données : 1) Recommande LE worktree à traiter en premier et pourquoi, une phrase courte. \
+             2) Si un worktree terminé semble répondre à sa demande initiale, propose la suite en une phrase commençant par « Je peux prompter <projet> pour … ». \
+             Maximum 3 phrases courtes au total. N'invente aucun projet hors liste."
+        };
+        let user = if en {
+            format!("Worktrees:\n{feed}\n\nYour recommendation?")
+        } else {
+            format!("Worktrees :\n{feed}\n\nTa recommandation ?")
+        };
 
-    let recommendation = crate::llm::chat_once(&model, system, &user, 60).unwrap_or_default();
-    if aborted(app, state) {
-        return;
+        let _ = crate::llm::chat_once_stream(&model, system, &user, 120, |sentence| {
+            if !interrupted() {
+                let _ = session.send(SpeechItem::Sentence { text: sentence, workspace: None });
+            }
+        });
     }
 
-    let mut parts = vec![if en {
-        "Hey, here's the recap.".to_string()
-    } else {
-        "Bonjour, voici le récap.".to_string()
-    }];
-    parts.extend(sentences);
-    if !recommendation.is_empty() {
-        parts.push(recommendation);
-    }
-    let brief = parts.join(" ");
-
-    // Let the renderer settle on its "AI awakening" intro before the first word.
-    std::thread::sleep(Duration::from_millis(900));
-    if aborted(app, state) {
-        return;
-    }
-
-    crate::speech::speak(app, state, &brief);
-}
-
-/// True if the user hit ⌥Space to skip the recap. Resets the pill to a resting
-/// state so it doesn't stay stuck on the violet boot visual.
-fn aborted(app: &AppHandle, state: &Arc<AppState>) -> bool {
-    if state.interrupt.load(Ordering::SeqCst) {
-        let _ = app.emit("speaking-done", ());
-        true
-    } else {
-        false
-    }
+    let _ = session.send(SpeechItem::End);
 }

@@ -87,6 +87,67 @@
     100% { opacity: 0; transform: translateX(110%); }
   }
 
+  /* ── Worktree carousel — vertical, scrolls to the worktree being spoken ── */
+  .carousel {
+    display: none;
+    flex-direction: column;
+    gap: 7px;
+    padding: 14px 16px 4px 16px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    scroll-behavior: smooth;
+    scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 14px, black calc(100% - 8px), transparent 100%);
+  }
+  .carousel::-webkit-scrollbar { display: none; }
+  body.carousel-open .carousel { display: flex; }
+  body.settings-open .carousel { display: none; } /* settings wins */
+
+  .ws-card {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 13px;
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 13px;
+    background: rgba(255,255,255,0.03);
+    opacity: 0.5;
+    transform: scale(0.98);
+    transition: opacity 0.35s ease, transform 0.35s var(--spring),
+                border-color 0.35s ease, background 0.35s ease;
+  }
+  .ws-card.speaking {
+    opacity: 1;
+    transform: scale(1);
+    border-color: rgba(167,139,250,0.45);
+    background: rgba(167,139,250,0.09);
+  }
+  .ws-status { width: 7px; height: 7px; border-radius: 50%; background: #5a5a64; flex-shrink: 0; }
+  .ws-card[data-status="working"] .ws-status { background: var(--amber); box-shadow: 0 0 6px rgba(245,158,11,0.5); }
+  .ws-card[data-status="idle"] .ws-status    { background: var(--green); }
+  .ws-card[data-status="error"] .ws-status   { background: #f87171; box-shadow: 0 0 6px rgba(248,113,113,0.6); }
+  .ws-name { font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.85); white-space: nowrap; }
+  .ws-meta {
+    font-size: 10.5px;
+    color: rgba(255,255,255,0.4);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+  }
+  .ws-unread {
+    font-size: 9.5px;
+    font-weight: 700;
+    background: rgba(167,139,250,0.2);
+    border: 1px solid rgba(167,139,250,0.4);
+    color: #c9b8fd;
+    padding: 1px 7px;
+    border-radius: 8px;
+    flex-shrink: 0;
+  }
+
   /* ── Settings panel (above the bar; the bar stays put at the bottom) ────
      The window grows UPWARD (bottom edge pinned), so the panel content is
      bottom-anchored (justify-content:flex-end) to sit still against the bar
@@ -413,6 +474,8 @@
 <div class="shell" data-tauri-drag-region>
   <div class="boot-sweep"></div>
 
+  <div class="carousel" id="carousel"></div>
+
   <div class="settings" id="settings">
     <div class="settings-header">
       <div class="settings-title" id="settings-title">paramètres</div>
@@ -484,6 +547,8 @@ const SIZE_SETTINGS = [500, 396]
 let state = 'idle'
 let agentCount = 0
 let settingsOpen = false
+let carouselOpen = false
+let carouselCloseTimer = null
 let hovered = false
 let uiLang = 'fr'
 
@@ -528,6 +593,7 @@ function setLabel(text) {
 function bodyClasses() {
   document.body.className = state
     + (settingsOpen ? ' settings-open' : '')
+    + (carouselOpen ? ' carousel-open' : '')
     + (hovered ? ' hovered' : '')
     + (transcriptEl.classList.contains('visible') ? ' has-transcript' : '')
 }
@@ -699,7 +765,9 @@ function vadTick() {
       isRecording = false
       pcmChunks = []
       clearTimeout(silenceTimer); silenceTimer = null
-      invoke('audio_done')
+      // interrupt (not audio_done): aborts the WHOLE queued session, not
+      // just the current sentence — otherwise the next sentence plays on.
+      invoke('interrupt')
       setState('active')
     }
   } else if (state === 'active' || state === 'running') {
@@ -790,7 +858,9 @@ function interruptSpeech() {
 }
 
 async function toggleVox() {
-  // During the startup recap (boot) or any reply (speaking), ⌥Space stops it.
+  // ⌥Space stops the startup recap (boot) or a reply being spoken (speaking).
+  // 'thinking' stays a no-op: interrupting an in-flight LLM call and letting a
+  // new turn start would race the abandoned reply onto the voice.
   if (state === 'boot' || state === 'speaking') {
     interruptSpeech()
     return
@@ -802,10 +872,73 @@ async function toggleVox() {
   }
 }
 
-// ── Window sizing (hover grow / settings) ────────────────────────────────────
+// ── Window sizing (hover grow / settings / carousel) ─────────────────────────
 function syncWindow() {
-  const [w, h] = settingsOpen ? SIZE_SETTINGS : (hovered ? SIZE_HOVER : SIZE_BASE)
+  let w, h
+  if (settingsOpen) {
+    ;[w, h] = SIZE_SETTINGS
+  } else if (carouselOpen) {
+    const cards = carouselEl.children.length
+    w = 500
+    h = 56 + 22 + Math.min(Math.max(cards, 1), 4) * 45
+  } else {
+    ;[w, h] = hovered ? SIZE_HOVER : SIZE_BASE
+  }
   invoke('resize_window', { width: w, height: h })
+}
+
+// ── Worktree carousel ─────────────────────────────────────────────────────────
+const carouselEl = document.getElementById('carousel')
+
+function buildCarousel(list) {
+  carouselEl.innerHTML = ''
+  for (const w of list) {
+    const card = document.createElement('div')
+    card.className = 'ws-card'
+    card.dataset.project = (w.project || '').toLowerCase()
+    card.dataset.status = w.status || 'none'
+    const dot = document.createElement('span'); dot.className = 'ws-status'
+    const name = document.createElement('span'); name.className = 'ws-name'
+    name.textContent = w.project || '?'
+    const meta = document.createElement('span'); meta.className = 'ws-meta'
+    meta.textContent = [w.agent, w.preview].filter(Boolean).join(' — ')
+    card.append(dot, name, meta)
+    if (w.unread > 0) {
+      const badge = document.createElement('span')
+      badge.className = 'ws-unread'
+      badge.textContent = w.unread
+      card.appendChild(badge)
+    }
+    carouselEl.appendChild(card)
+  }
+}
+
+function openCarousel() {
+  clearTimeout(carouselCloseTimer)
+  if (settingsOpen || carouselOpen) return
+  carouselOpen = true
+  bodyClasses()
+  syncWindow()
+}
+
+function closeCarousel(delay = 0) {
+  clearTimeout(carouselCloseTimer)
+  carouselCloseTimer = setTimeout(() => {
+    if (!carouselOpen) return
+    carouselOpen = false
+    bodyClasses()
+    syncWindow()
+  }, delay)
+}
+
+function highlightWorkspace(name) {
+  if (!carouselOpen || !name) return
+  const sel = `.ws-card[data-project="${CSS.escape(String(name).toLowerCase())}"]`
+  const target = carouselEl.querySelector(sel)
+  for (const c of carouselEl.querySelectorAll('.ws-card')) {
+    c.classList.toggle('speaking', c === target)
+  }
+  if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' })
 }
 
 let hoverOutTimer = null
@@ -893,6 +1026,9 @@ updateBtn.addEventListener('click', async () => {
 
 async function openSettings() {
   if (settingsOpen) return
+  // Settings takes the panel space — retire the carousel instantly.
+  clearTimeout(carouselCloseTimer)
+  carouselOpen = false
   settingsOpen = true
   bodyClasses()
   syncWindow()
@@ -959,20 +1095,36 @@ listen('speaking-start', () => {
 
 listen('speaking-done', () => {
   currentAudio = null
-  setState(micStream ? 'active' : (agentCount > 0 ? 'running' : 'idle'))
+  // Only settle if we're still in a TTS state. A late/duplicate speaking-done
+  // (e.g. from an interrupt that already reset us, or from an aborted recap
+  // whose LLM call finished seconds later) must not clobber a state the user
+  // has since moved into — otherwise it can strand an active recording.
+  if (state === 'speaking' || state === 'boot') {
+    setState(micStream ? 'active' : (agentCount > 0 ? 'running' : 'idle'))
+  }
+  if (carouselOpen) closeCarousel(1400)
   if (transcriptEl.classList.contains('visible')) {
     clearTimeout(transcriptHideTimer)
     transcriptHideTimer = setTimeout(hideTranscript, 1300)
   }
 })
 
-// Kokoro audio: played here so echo cancellation enables barge-in
+// TTS audio: played here so echo cancellation enables barge-in. Payload is
+// one queued sentence: { path, workspace? } — the workspace tag drives the
+// carousel highlight while Vox talks about that worktree.
 listen('play-wav', (e) => {
-  const src = convertFileSrc(e.payload)
+  const src = convertFileSrc(e.payload.path)
+  if (e.payload.workspace) highlightWorkspace(e.payload.workspace)
   currentAudio = new Audio(src)
   currentAudio.onended = () => { currentAudio = null; invoke('audio_done') }
   currentAudio.onerror = () => { currentAudio = null; invoke('audio_done') }
   currentAudio.play().catch(() => { currentAudio = null; invoke('audio_done') })
+})
+
+// Worktree cards for the recap carousel — arrives just before the brief.
+listen('workspaces-data', (e) => {
+  buildCarousel(Array.isArray(e.payload) ? e.payload : [])
+  openCarousel()
 })
 
 listen('agent-status', (e) => {

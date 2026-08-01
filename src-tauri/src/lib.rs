@@ -268,6 +268,11 @@ async fn voice_input(
 ) -> Result<(), String> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // Clear any leftover interrupt (e.g. from skipping the startup recap)
+        // so it doesn't suppress this reply; a fresh ⌥Space during 'thinking'
+        // sets it again and speak() will honor it.
+        st.interrupt.store(false, Ordering::SeqCst);
+
         use base64::Engine;
         let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&wav) else {
             let _ = app.emit("speaking-done", ());
@@ -295,12 +300,9 @@ async fn voice_input(
         // Renderer reveals this letter by letter.
         let _ = app.emit("transcript", &transcript);
 
-        let reply = llm::ask_ollama(&app, &st, &transcript);
-        if reply.is_empty() {
-            let _ = app.emit("speaking-done", ());
-        } else {
-            speech::speak(&app, &st, &reply);
-        }
+        // Streams the reply to TTS as it generates and guarantees a
+        // speaking-done on every path.
+        llm::ask_ollama(&app, &st, &transcript);
     })
     .await
     .map_err(|e| e.to_string())
