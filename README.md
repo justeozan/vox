@@ -2,7 +2,9 @@
 
 A floating voice pill for macOS that lets you talk to your [Conductor](https://conductor.build) worktrees instead of alt-tabbing between them.
 
-![Vox demo](docs/vox-demo.gif)
+<p align="center">
+  <img src="docs/vox-demo.gif" alt="Vox demo" width="600">
+</p>
 
 ## What it does
 
@@ -37,6 +39,10 @@ Everything runs on your machine. No cloud calls, no API keys.
 1. Download the latest `.dmg` from [Releases](https://github.com/justeozan/vox/releases).
 2. Open it and drag **Vox** into Applications.
 3. First launch: macOS will refuse to open it because the build is ad-hoc signed, not notarized. **Right-click Vox.app → Open**, confirm once — you only need to do this the first time.
+   Or clear the quarantine flag from the terminal:
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/Vox.app
+   ```
 4. Set up the local speech stack (Whisper, Kokoro, Piper) into `~/.vox/venv`:
    ```bash
    ./scripts/install.sh
