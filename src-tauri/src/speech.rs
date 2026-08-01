@@ -207,8 +207,10 @@ fn say_fallback(state: &Arc<AppState>, text: &str) {
 // ── Queued speech session ────────────────────────────────────────────────────
 
 enum PlayMsg {
-    Wav { path: PathBuf, workspace: Option<String> },
-    Say { text: String },
+    // `display` is the original sentence (pre-pronunciation-respelling) —
+    // shown as the live transcript while it plays.
+    Wav { path: PathBuf, workspace: Option<String>, display: String },
+    Say { text: String, display: String },
     End,
 }
 
@@ -268,11 +270,11 @@ fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>, g
                     let spoken = apply_pronunciations(&text);
                     let msg = if use_daemon {
                         match synthesize_daemon(&synth_state, &spoken) {
-                            Some(path) => PlayMsg::Wav { path, workspace },
-                            None => PlayMsg::Say { text: spoken },
+                            Some(path) => PlayMsg::Wav { path, workspace, display: text },
+                            None => PlayMsg::Say { text: spoken, display: text },
                         }
                     } else {
-                        PlayMsg::Say { text: spoken }
+                        PlayMsg::Say { text: spoken, display: text }
                     };
                     if ptx.send(msg).is_err() {
                         break;
@@ -289,7 +291,7 @@ fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>, g
         let interrupted = cancelled(&state);
         match msg {
             PlayMsg::End => break,
-            PlayMsg::Wav { path, workspace } => {
+            PlayMsg::Wav { path, workspace, display } => {
                 if interrupted {
                     let _ = std::fs::remove_file(&path);
                     continue;
@@ -298,6 +300,11 @@ fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>, g
                     let _ = app.emit("speaking-start", ());
                     started = true;
                 }
+                // Live transcript of what Vox is saying, sentence by sentence.
+                let _ = app.emit(
+                    "speaking-text",
+                    serde_json::json!({ "text": display, "workspace": workspace }),
+                );
                 let id = state.play_id.fetch_add(1, Ordering::SeqCst) + 1;
                 let (tx_done, rx_done) = channel::<()>();
                 *state.audio_done.lock().unwrap() = Some((id, tx_done));
@@ -313,7 +320,7 @@ fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>, g
                 *state.audio_done.lock().unwrap() = None;
                 let _ = std::fs::remove_file(&path);
             }
-            PlayMsg::Say { text } => {
+            PlayMsg::Say { text, display } => {
                 if interrupted {
                     continue;
                 }
@@ -321,6 +328,10 @@ fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>, g
                     let _ = app.emit("speaking-start", ());
                     started = true;
                 }
+                let _ = app.emit(
+                    "speaking-text",
+                    serde_json::json!({ "text": display, "workspace": null }),
+                );
                 say_fallback(&state, &text);
             }
         }

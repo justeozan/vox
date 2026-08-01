@@ -350,6 +350,24 @@ fn interrupt(state: tauri::State<'_, Arc<AppState>>) {
     }
 }
 
+/// Re-run the worktree recap on demand (recap button next to the gear).
+#[tauri::command]
+fn replay_recap(app: AppHandle, state: tauri::State<'_, Arc<AppState>>) {
+    let st = state.inner().clone();
+    std::thread::spawn(move || {
+        st.startup_brief_done.store(false, Ordering::SeqCst);
+        if !conductor::speak_startup_brief(&app, &st) {
+            // A button press deserves a reply even when there's nothing.
+            let en = st.settings.lock().unwrap().language == "en";
+            speech::speak(
+                &app,
+                &st,
+                if en { "No active worktree to report." } else { "Aucun worktree actif à signaler." },
+            );
+        }
+    });
+}
+
 // ── Version & updates ─────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -499,6 +517,7 @@ pub fn run() {
             audio_done,
             resize_window,
             interrupt,
+            replay_recap,
             get_version,
             check_update,
             open_url,

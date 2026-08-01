@@ -512,6 +512,13 @@
     <div class="transcript" id="transcript"></div>
     <div class="label" id="label" data-tauri-drag-region>⌥ space</div>
     <div class="badge" id="badge">0 agents</div>
+    <button class="gear" id="recap-btn" aria-label="recap">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 12a9 9 0 1 0 2.83-6.54"/>
+        <polyline points="3 3 3 8 8 8"/>
+        <path d="M12 7v5l3.5 2"/>
+      </svg>
+    </button>
     <button class="gear" id="gear" aria-label="settings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="3.2"/>
@@ -540,7 +547,7 @@ const SPEECH_SNR         = 2.2
 // ── Window geometry (must mirror the Rust animate_frame anchoring) ──────────
 // Hover growth is HORIZONTAL ONLY — height never changes on hover.
 const SIZE_BASE     = [480, 56]
-const SIZE_HOVER    = [524, 56]
+const SIZE_HOVER    = [548, 56]  // room for BOTH hover buttons (recap + gear)
 const SIZE_SETTINGS = [500, 396]
 
 // ── State machine ─────────────────────────────────────────────────────────────
@@ -659,8 +666,9 @@ function animateWaveform(s) {
 const transcriptEl = document.getElementById('transcript')
 let transcriptHideTimer = null
 
-function showTranscript(text) {
+function showTranscript(text, holdMs = 8000) {
   clearTimeout(transcriptHideTimer)
+  transcriptHideTimer = null
   transcriptEl.innerHTML = ''
 
   const MAX = 95
@@ -683,13 +691,16 @@ function showTranscript(text) {
   transcriptEl.appendChild(frag)
   transcriptEl.classList.add('visible')
   bodyClasses()
-  transcriptHideTimer = setTimeout(hideTranscript, 8000)
+  // holdMs = 0 → no auto-hide (live speech: the next sentence or the
+  // speaking-done handler decides).
+  if (holdMs > 0) transcriptHideTimer = setTimeout(hideTranscript, holdMs)
 }
 
 function hideTranscript() {
   transcriptEl.classList.remove('visible')
   clearTimeout(transcriptHideTimer)
   transcriptHideTimer = null
+  voxIsShowing = false
   bodyClasses()
 }
 
@@ -1072,6 +1083,19 @@ function toggleSettings() {
 
 document.getElementById('gear').addEventListener('click', toggleSettings)
 
+// Recap button — replay the worktree recap on demand. Ignored while Vox is
+// already busy talking/listening/thinking (sessions would just queue up),
+// and debounced: a double-click must not queue two recaps.
+let lastRecapAt = 0
+document.getElementById('recap-btn').addEventListener('click', () => {
+  const now = Date.now()
+  if (now - lastRecapAt < 1500) return
+  if (state === 'idle' || state === 'active' || state === 'running') {
+    lastRecapAt = now
+    invoke('replay_recap')
+  }
+})
+
 modelSelect.addEventListener('change', () => {
   invoke('set_settings', { next: { model: modelSelect.value } })
 })
@@ -1107,7 +1131,9 @@ listen('speaking-done', () => {
   if (carouselOpen) closeCarousel(1400)
   if (transcriptEl.classList.contains('visible')) {
     clearTimeout(transcriptHideTimer)
-    transcriptHideTimer = setTimeout(hideTranscript, 1300)
+    // Vox's last sentence (usually the recommendation) stays readable for a
+    // while; the user's own words fade quickly as before.
+    transcriptHideTimer = setTimeout(hideTranscript, voxIsShowing ? 45000 : 1300)
   }
 })
 
@@ -1160,7 +1186,20 @@ listen('agent-status', (e) => {
 })
 
 listen('transcript', (e) => {
-  if (e.payload && e.payload.trim()) showTranscript(e.payload.trim())
+  if (e.payload && e.payload.trim()) {
+    voxIsShowing = false
+    showTranscript(e.payload.trim())
+  }
+})
+
+// Live transcript of Vox's own speech, one sentence at a time. The last
+// sentence sticks around after speaking-done (that's usually the advice).
+let voxIsShowing = false
+listen('speaking-text', (e) => {
+  const t = (e.payload.text || '').trim()
+  if (!t) return
+  voxIsShowing = true
+  showTranscript(t, 0)
 })
 
 listen('startup-brief-starting', () => {

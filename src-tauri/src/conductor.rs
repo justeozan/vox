@@ -146,6 +146,7 @@ pub fn read_state(max_items: usize) -> Vec<Workspace> {
          FROM workspaces w \
          LEFT JOIN repos r ON w.repository_id = r.id \
          WHERE w.state = 'ready' AND w.derived_status = 'in-progress' \
+           AND (r.hidden IS NULL OR r.hidden = 0) \
          ORDER BY w.updated_at DESC LIMIT {max_items};"
     ));
 
@@ -195,7 +196,8 @@ pub fn find_workspace_path(name: &str) -> Option<String> {
             OR lower(w.workspace_name) = '{needle}') AS exact_match \
          FROM workspaces w \
          LEFT JOIN repos r ON w.repository_id = r.id \
-         WHERE w.state = 'ready' AND w.workspace_path IS NOT NULL AND ( \
+         WHERE w.state = 'ready' AND w.workspace_path IS NOT NULL \
+           AND (r.hidden IS NULL OR r.hidden = 0) AND ( \
             lower(r.name) = '{needle}' \
             OR lower(w.directory_name) = '{needle}' \
             OR lower(w.workspace_name) = '{needle}' \
@@ -359,9 +361,11 @@ fn build_brief_sentences(ws: &[Workspace], en: bool, seed: usize) -> Vec<(String
 
 // ── Startup brief ────────────────────────────────────────────────────────────
 
-pub fn speak_startup_brief(app: &AppHandle, state: &Arc<AppState>) {
+/// Returns true if a recap was actually spoken (false: already done, no
+/// workspaces, nothing to say, or aborted before speech).
+pub fn speak_startup_brief(app: &AppHandle, state: &Arc<AppState>) -> bool {
     if state.startup_brief_done.swap(true, Ordering::SeqCst) {
-        return;
+        return false;
     }
     // Generation-based cancellation: any ⌥Space/barge-in AFTER this point
     // kills the brief for good — nothing can re-arm it (the old bool flag
@@ -372,7 +376,7 @@ pub fn speak_startup_brief(app: &AppHandle, state: &Arc<AppState>) {
 
     let ws = read_state(10);
     if ws.is_empty() {
-        return;
+        return false;
     }
     let seed = (SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -380,7 +384,7 @@ pub fn speak_startup_brief(app: &AppHandle, state: &Arc<AppState>) {
         .unwrap_or(0) / 60) as usize;
     let sentences = build_brief_sentences(&ws, en, seed);
     if sentences.is_empty() {
-        return;
+        return false;
     }
 
     // Carousel cards for the renderer — sent before anything is spoken.
@@ -405,7 +409,7 @@ pub fn speak_startup_brief(app: &AppHandle, state: &Arc<AppState>) {
     let interrupted = || state.interrupt_gen.load(Ordering::SeqCst) != gen0;
     if interrupted() {
         let _ = app.emit("speaking-done", ());
-        return;
+        return false;
     }
 
     // Everything below streams into one speech session: the deterministic
@@ -481,4 +485,5 @@ pub fn speak_startup_brief(app: &AppHandle, state: &Arc<AppState>) {
     }
 
     let _ = session.send(SpeechItem::End);
+    true
 }
