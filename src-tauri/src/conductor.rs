@@ -185,15 +185,22 @@ pub fn find_workspace_path(name: &str) -> Option<String> {
     if needle.is_empty() || needle.chars().count() > 80 {
         return None;
     }
+    // Exact name matches MUST outrank the fuzzy branch match — otherwise a
+    // substring hit on another repo's branch could beat the exact repo name
+    // and send a prompt (and an agent) to the wrong worktree.
     let rows = sql(&format!(
-        "SELECT w.workspace_path FROM workspaces w \
+        "SELECT w.workspace_path, \
+           (lower(r.name) = '{needle}' \
+            OR lower(w.directory_name) = '{needle}' \
+            OR lower(w.workspace_name) = '{needle}') AS exact_match \
+         FROM workspaces w \
          LEFT JOIN repos r ON w.repository_id = r.id \
          WHERE w.state = 'ready' AND w.workspace_path IS NOT NULL AND ( \
             lower(r.name) = '{needle}' \
             OR lower(w.directory_name) = '{needle}' \
             OR lower(w.workspace_name) = '{needle}' \
             OR lower(w.branch) LIKE '%{needle}%') \
-         ORDER BY w.updated_at DESC LIMIT 1;"
+         ORDER BY exact_match DESC, w.updated_at DESC LIMIT 1;"
     ));
     rows.first()
         .map(|r| s(r, "workspace_path"))
@@ -253,8 +260,12 @@ fn build_brief_sentences(ws: &[Workspace], en: bool, seed: usize) -> Vec<(String
         let Some(sess) = w.session.as_ref() else { continue };
         let p = &w.project;
         let a = &sess.agent;
-        let preview = sess.preview.as_deref().map(clean_snippet).unwrap_or_default();
-        let looks_like_question = preview.ends_with('?')
+        let raw_preview = sess.preview.as_deref().unwrap_or("");
+        let preview = clean_snippet(raw_preview);
+        // Detect questions on the RAW preview: clean_snippet keeps only the
+        // first sentence, which drops the trailing "…anything else?" that the
+        // "summary. Question?" agent pattern ends with.
+        let looks_like_question = raw_preview.trim_end().ends_with('?')
             || Regex::new(r"(?i)\b(peux|veux|est-ce|c'est quoi|comment|dois-je|can|should|which|what)\b")
                 .unwrap()
                 .is_match(&preview);
@@ -311,10 +322,18 @@ fn build_brief_sentences(ws: &[Workspace], en: bool, seed: usize) -> Vec<(String
                     None
                 }
             }
-            _ => {
-                quiet.push(p.clone());
-                None
-            }
+            // Conductor's real status set includes 'waiting' (agent blocked
+            // on user input/permission) — the OPPOSITE of quiet.
+            "waiting" => Some(match v % 3 {
+                0 if en => format!("{p} is waiting on you to continue."),
+                1 if en => format!("The agent on {p} is blocked, waiting for your input."),
+                _ if en => format!("{p} needs you before it can move on."),
+                0 => format!("{p} attend ton feu vert pour continuer."),
+                1 => format!("L'agent sur {p} est bloqué, il attend ta réponse."),
+                _ => format!("{p} a besoin de toi pour avancer."),
+            }),
+            // Unknown status: say nothing rather than wrongly claim all-quiet.
+            _ => None,
         };
         if let Some(text) = sentence {
             out.push((text, Some(p.clone())));
@@ -344,7 +363,10 @@ pub fn speak_startup_brief(app: &AppHandle, state: &Arc<AppState>) {
     if state.startup_brief_done.swap(true, Ordering::SeqCst) {
         return;
     }
-    state.interrupt.store(false, Ordering::SeqCst);
+    // Generation-based cancellation: any ⌥Space/barge-in AFTER this point
+    // kills the brief for good — nothing can re-arm it (the old bool flag
+    // could be cleared by the next voice turn, resurrecting killed advice).
+    let gen0 = state.interrupt_gen.load(Ordering::SeqCst);
 
     let en = state.settings.lock().unwrap().language == "en";
 
@@ -380,7 +402,7 @@ pub fn speak_startup_brief(app: &AppHandle, state: &Arc<AppState>) {
     // Violet "awakening" visual immediately — speech streams in behind it.
     let _ = app.emit("startup-brief-starting", ());
 
-    let interrupted = || state.interrupt.load(Ordering::SeqCst);
+    let interrupted = || state.interrupt_gen.load(Ordering::SeqCst) != gen0;
     if interrupted() {
         let _ = app.emit("speaking-done", ());
         return;
@@ -448,7 +470,10 @@ pub fn speak_startup_brief(app: &AppHandle, state: &Arc<AppState>) {
             format!("Worktrees :\n{feed}\n\nTa recommandation ?")
         };
 
-        let _ = crate::llm::chat_once_stream(&model, system, &user, 120, |sentence| {
+        // The cancel callback aborts the SSE read loop itself, so an
+        // interrupted brief releases the speech session (and speak_lock)
+        // promptly instead of holding them for the full generation.
+        let _ = crate::llm::chat_once_stream(&model, system, &user, 120, &interrupted, |sentence| {
             if !interrupted() {
                 let _ = session.send(SpeechItem::Sentence { text: sentence, workspace: None });
             }

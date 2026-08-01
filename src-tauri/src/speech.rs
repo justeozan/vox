@@ -182,12 +182,18 @@ fn synthesize_daemon(state: &Arc<AppState>, text: &str) -> Option<PathBuf> {
     // as separate lines by the daemon, truncating synthesis.
     let flat = text.replace(['\r', '\n'], ". ");
     let flat = Regex::new(r"\.\s*\.+").unwrap().replace_all(&flat, ".").to_string();
-    let resp = d.request(&format!("{}\t{}", out.display(), flat), Duration::from_secs(15))?;
-    if resp.starts_with("ok:") {
-        Some(out)
-    } else {
-        eprintln!("[vox] tts daemon error: {resp}");
-        None
+    let resp = d.request(&format!("{}\t{}", out.display(), flat), Duration::from_secs(15));
+    match resp {
+        Some(r) if r.starts_with("ok:") => Some(out),
+        other => {
+            if let Some(r) = other {
+                eprintln!("[vox] tts daemon error: {r}");
+            }
+            // On timeout the daemon may still finish writing the file later —
+            // best-effort cleanup so orphaned wavs don't pile up in /tmp.
+            let _ = std::fs::remove_file(&out);
+            None
+        }
     }
 }
 
@@ -209,17 +215,21 @@ enum PlayMsg {
 /// Begin a queued speech session. Push sentences on the returned channel as
 /// they become available and finish with `SpeechItem::End`. The session emits
 /// speaking-start before the first sound and exactly one speaking-done at the
-/// end, honors `state.interrupt` at every step, and synthesizes one sentence
+/// end, honors interrupt-generation cancellation at every step, and synthesizes one sentence
 /// ahead of playback.
 pub fn start_session(app: AppHandle, state: Arc<AppState>) -> Sender<SpeechItem> {
+    // Capture the interrupt generation NOW: this session is cancelled iff the
+    // user interrupts AFTER its creation. Past interrupts never bleed in.
+    let gen = state.interrupt_gen.load(Ordering::SeqCst);
     let (tx, rx) = channel::<SpeechItem>();
-    std::thread::spawn(move || run_session(app, state, rx));
+    std::thread::spawn(move || run_session(app, state, rx, gen));
     tx
 }
 
-fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>) {
+fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>, gen: u64) {
     // Serialize sessions — a second speak while one is running waits its turn.
     let _guard = state.speak_lock.lock().unwrap();
+    let cancelled = |st: &Arc<AppState>| st.interrupt_gen.load(Ordering::SeqCst) != gen;
 
     let engine = std::env::var("VOX_TTS")
         .unwrap_or_else(|_| {
@@ -232,7 +242,7 @@ fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>) {
     // model). Interrupt aborts the wait.
     if use_daemon {
         for _ in 0..80 {
-            if state.interrupt.load(Ordering::SeqCst) {
+            if cancelled(&state) {
                 break;
             }
             let ready = state.tts.lock().unwrap().as_ref().map(|d| d.is_ready()).unwrap_or(false);
@@ -248,7 +258,7 @@ fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>) {
     let synth_state = state.clone();
     let synth = std::thread::spawn(move || {
         for item in rx {
-            if synth_state.interrupt.load(Ordering::SeqCst) {
+            if synth_state.interrupt_gen.load(Ordering::SeqCst) != gen {
                 break;
             }
             match item {
@@ -276,7 +286,7 @@ fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>) {
     // Play stage.
     let mut started = false;
     for msg in prx {
-        let interrupted = state.interrupt.load(Ordering::SeqCst);
+        let interrupted = cancelled(&state);
         match msg {
             PlayMsg::End => break,
             PlayMsg::Wav { path, workspace } => {
@@ -288,11 +298,16 @@ fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>) {
                     let _ = app.emit("speaking-start", ());
                     started = true;
                 }
+                let id = state.play_id.fetch_add(1, Ordering::SeqCst) + 1;
                 let (tx_done, rx_done) = channel::<()>();
-                *state.audio_done.lock().unwrap() = Some(tx_done);
+                *state.audio_done.lock().unwrap() = Some((id, tx_done));
                 let _ = app.emit(
                     "play-wav",
-                    serde_json::json!({ "path": path.to_string_lossy(), "workspace": workspace }),
+                    serde_json::json!({
+                        "path": path.to_string_lossy(),
+                        "workspace": workspace,
+                        "id": id,
+                    }),
                 );
                 let _ = rx_done.recv_timeout(Duration::from_secs(120));
                 *state.audio_done.lock().unwrap() = None;
@@ -316,11 +331,9 @@ fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>) {
 
 /// Speak a complete text (split into sentences, queued, non-blocking). The
 /// renderer is driven by speaking-start / play-wav / speaking-done events.
+/// No interrupt pre-check needed: the session captures the current interrupt
+/// generation, so only a FUTURE ⌥Space can cancel it.
 pub fn speak(app: &AppHandle, state: &Arc<AppState>, text: &str) {
-    if state.interrupt.load(Ordering::SeqCst) {
-        let _ = app.emit("speaking-done", ());
-        return;
-    }
     let tx = start_session(app.clone(), state.clone());
     for s in split_sentences(text) {
         let _ = tx.send(SpeechItem::Sentence { text: s, workspace: None });

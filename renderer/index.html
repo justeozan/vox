@@ -854,6 +854,7 @@ function interruptSpeech() {
     currentAudio = null
   }
   invoke('interrupt')  // stops in-flight playback + aborts a pending brief
+  closeCarousel(0)     // don't leave the recap cards hanging on screen
   setState(micStream ? 'active' : (agentCount > 0 ? 'running' : 'idle'))
 }
 
@@ -1095,11 +1096,12 @@ listen('speaking-start', () => {
 
 listen('speaking-done', () => {
   currentAudio = null
-  // Only settle if we're still in a TTS state. A late/duplicate speaking-done
-  // (e.g. from an interrupt that already reset us, or from an aborted recap
-  // whose LLM call finished seconds later) must not clobber a state the user
-  // has since moved into — otherwise it can strand an active recording.
-  if (state === 'speaking' || state === 'boot') {
+  // Settle from any TTS/pending state. 'thinking' MUST be included: error
+  // paths (Ollama down, empty transcript, empty tool text) emit speaking-done
+  // without ever emitting speaking-start, and 'thinking' has no other exit —
+  // excluding it bricked the pill until restart. 'active'/'listening' stay
+  // protected from late duplicate speaking-done events.
+  if (state === 'speaking' || state === 'boot' || state === 'thinking') {
     setState(micStream ? 'active' : (agentCount > 0 ? 'running' : 'idle'))
   }
   if (carouselOpen) closeCarousel(1400)
@@ -1110,21 +1112,41 @@ listen('speaking-done', () => {
 })
 
 // TTS audio: played here so echo cancellation enables barge-in. Payload is
-// one queued sentence: { path, workspace? } — the workspace tag drives the
-// carousel highlight while Vox talks about that worktree.
+// one queued sentence: { path, workspace?, id } — the workspace tag drives
+// the carousel, the id makes the done-ack idempotent (a failed load fires
+// both onerror AND play().catch; a duplicate ack must not consume the NEXT
+// sentence's wait on the Rust side).
 listen('play-wav', (e) => {
   const src = convertFileSrc(e.payload.path)
-  if (e.payload.workspace) highlightWorkspace(e.payload.workspace)
+  const id = e.payload.id
+  if (e.payload.workspace) {
+    // Sessions serialize on the Rust side, so the recap may start speaking
+    // after another reply's speaking-done already closed the carousel —
+    // reopen it lazily whenever a workspace-tagged sentence plays.
+    if (!carouselOpen && !settingsOpen && carouselEl.children.length > 0) openCarousel()
+    highlightWorkspace(e.payload.workspace)
+  }
+  let acked = false
+  const finish = () => {
+    if (acked) return
+    acked = true
+    currentAudio = null
+    invoke('audio_done', { id })
+  }
   currentAudio = new Audio(src)
-  currentAudio.onended = () => { currentAudio = null; invoke('audio_done') }
-  currentAudio.onerror = () => { currentAudio = null; invoke('audio_done') }
-  currentAudio.play().catch(() => { currentAudio = null; invoke('audio_done') })
+  currentAudio.onended = finish
+  currentAudio.onerror = finish
+  currentAudio.play().catch(finish)
 })
 
 // Worktree cards for the recap carousel — arrives just before the brief.
+// Only auto-open from a resting/boot state; never yank the UI open while the
+// user is mid-recording or mid-reply (play-wav reopens it lazily anyway).
 listen('workspaces-data', (e) => {
   buildCarousel(Array.isArray(e.payload) ? e.payload : [])
-  openCarousel()
+  if (state === 'idle' || state === 'active' || state === 'running' || state === 'boot') {
+    openCarousel()
+  }
 })
 
 listen('agent-status', (e) => {
@@ -1142,7 +1164,16 @@ listen('transcript', (e) => {
 })
 
 listen('startup-brief-starting', () => {
-  setState('boot')
+  // Mid-utterance: finish the recording first (the recap will queue behind
+  // the reply on the Rust side). Flipping to 'boot' here would strand
+  // isRecording forever — vadTick has no 'boot' branch.
+  if (state === 'listening') {
+    sendSpeech()
+    return
+  }
+  if (state === 'idle' || state === 'active' || state === 'running') {
+    setState('boot')
+  }
 })
 
 // ── Init ──────────────────────────────────────────────────────────────────────

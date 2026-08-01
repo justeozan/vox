@@ -104,9 +104,18 @@ fn post_chat(body: &Value, timeout_secs: u64) -> Result<Value, String> {
 }
 
 /// Stream an SSE chat completion, invoking `on_delta` with each
-/// `choices[0].delta` object. Errors if the endpoint or stream fails before
-/// any data arrives (callers then fall back to non-streamed paths).
-fn stream_chat(body: &Value, timeout_secs: u64, mut on_delta: impl FnMut(&Value)) -> Result<(), String> {
+/// `choices[0].delta` object. `cancel` is polled per line so callers can
+/// abort a stream promptly (e.g. ⌥Space during the recap). Errors ONLY if
+/// the endpoint or stream fails before any data arrives — a mid-stream cut
+/// after data was already delivered (including ureq's total-read timeout on
+/// slow generations) returns Ok with whatever was streamed, since the spoken
+/// sentences cannot be unsaid.
+fn stream_chat(
+    body: &Value,
+    timeout_secs: u64,
+    cancel: &dyn Fn() -> bool,
+    mut on_delta: impl FnMut(&Value),
+) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
     let resp = ureq::post(OLLAMA_URL)
         .timeout(Duration::from_secs(timeout_secs))
@@ -114,7 +123,14 @@ fn stream_chat(body: &Value, timeout_secs: u64, mut on_delta: impl FnMut(&Value)
         .map_err(|e| e.to_string())?;
     let mut saw_data = false;
     for line in BufReader::new(resp.into_reader()).lines() {
-        let line = line.map_err(|e| e.to_string())?;
+        if cancel() {
+            break;
+        }
+        let line = match line {
+            Ok(l) => l,
+            Err(_) if saw_data => break,
+            Err(e) => return Err(e.to_string()),
+        };
         let line = line.trim();
         let Some(data) = line.strip_prefix("data:") else { continue };
         let data = data.trim();
@@ -149,13 +165,16 @@ pub fn chat_once(model: &str, system: &str, user: &str, max_tokens: u32) -> Opti
 }
 
 /// Streamed one-shot chat: `on_sentence` fires as each sentence completes,
-/// so TTS can start before generation finishes. Falls back to the blocking
-/// call if streaming fails. Returns the full text.
+/// so TTS can start before generation finishes. `cancel` aborts the stream
+/// (and skips the fallback). Falls back to the blocking call ONLY when
+/// nothing was emitted — a partial stream must not be replayed from the top.
+/// Returns the full text.
 pub fn chat_once_stream(
     model: &str,
     system: &str,
     user: &str,
     max_tokens: u32,
+    cancel: &dyn Fn() -> bool,
     mut on_sentence: impl FnMut(String),
 ) -> Option<String> {
     let body = json!({
@@ -169,23 +188,31 @@ pub fn chat_once_stream(
     });
     let mut sbuf = speech::SentenceBuffer::new();
     let mut full = String::new();
-    let res = stream_chat(&body, 90, |delta| {
+    let mut emitted = 0usize;
+    let res = stream_chat(&body, 90, cancel, |delta| {
         if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
             full.push_str(c);
             for s in sbuf.push(c) {
+                emitted += 1;
                 on_sentence(s);
             }
         }
     });
     if res.is_err() {
+        if cancel() || emitted > 0 {
+            // Already spoke part of it (or was cancelled) — never replay.
+            return if full.trim().is_empty() { None } else { Some(full) };
+        }
         let text = chat_once(model, system, user, max_tokens)?;
         for s in speech::split_sentences(&text) {
             on_sentence(s);
         }
         return Some(text);
     }
-    if let Some(rest) = sbuf.flush() {
-        on_sentence(rest);
+    if !cancel() {
+        if let Some(rest) = sbuf.flush() {
+            on_sentence(rest);
+        }
     }
     let full = full.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
     if full.is_empty() {
@@ -273,23 +300,30 @@ fn execute_parsed(
         Value::Array(a) => a,
         v => vec![v],
     };
-    let mut voice = String::new();
+    let mut text_voice = String::new();
+    let mut override_voice = String::new();
     for item in &actions {
         let action = item.get("action").and_then(|a| a.as_str()).unwrap_or("none");
         if action != "none" {
-            if let Some(override_text) = apply_action(app, state, registry, action, item) {
-                if voice.is_empty() {
-                    voice = override_text;
+            if let Some(ov) = apply_action(app, state, registry, action, item) {
+                if override_voice.is_empty() {
+                    override_voice = ov;
                 }
             }
         }
-        if voice.is_empty() {
+        if text_voice.is_empty() {
             if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
-                voice = t.to_string();
+                text_voice = t.to_string();
             }
         }
     }
-    voice
+    // An override means the action FAILED — speaking the model's optimistic
+    // confirmation instead would be a lie.
+    if !override_voice.is_empty() {
+        override_voice
+    } else {
+        text_voice
+    }
 }
 
 // ── System prompt ────────────────────────────────────────────────────────────
@@ -386,10 +420,17 @@ fn build_system(state: &Arc<AppState>) -> String {
 // ── Main entry ───────────────────────────────────────────────────────────────
 
 /// True when the streamed content is shaping up to be an inline tool call
-/// (`switch_project {"name":…}`) or bare JSON — hold speech until it's parsed.
+/// (`switch_project {"name":…}`), bare JSON, or a prose sentence followed by
+/// a JSON action blob (the classic weak-model shape) — stop feeding speech
+/// from this point on and parse the whole thing at stream end.
 fn looks_like_inline_tool(s: &str) -> bool {
     let t = s.trim_start();
     if t.starts_with('{') || t.starts_with("```") || t.starts_with('[') {
+        return true;
+    }
+    // A `{"` anywhere means a JSON object is starting mid-content; real
+    // spoken prose essentially never contains one.
+    if t.contains("{\"") {
         return true;
     }
     if let Some(pos) = t.find('{') {
@@ -436,13 +477,32 @@ pub fn ask_ollama(app: &AppHandle, state: &Arc<AppState>, transcript: &str) {
             "stream": true
         }),
         120,
+        &|| false,
         |delta| {
             if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                 for tc in tcs {
-                    let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+                    // Ollama's OpenAI-compat layer has emitted `index` as the
+                    // position within EACH chunk (0 for every one-call chunk),
+                    // so we can't trust it as identity. If the slot already
+                    // holds a complete JSON args object and a new object
+                    // starts, that's a NEW call — allocate a fresh slot.
+                    let mut idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+                    if let Some(a) = tc.pointer("/function/arguments").and_then(|v| v.as_str()) {
+                        let complete = tool_acc
+                            .get(&idx)
+                            .is_some_and(|(_, args)| {
+                                !args.is_empty() && serde_json::from_str::<Value>(args).is_ok()
+                            });
+                        if complete && a.trim_start().starts_with('{') {
+                            idx = tool_acc.keys().max().copied().unwrap_or(0) + 1;
+                        }
+                    }
                     let entry = tool_acc.entry(idx).or_default();
                     if let Some(n) = tc.pointer("/function/name").and_then(|v| v.as_str()) {
-                        entry.0.push_str(n);
+                        // Names arrive whole; never concatenate two of them.
+                        if entry.0.is_empty() {
+                            entry.0.push_str(n);
+                        }
                     }
                     if let Some(a) = tc.pointer("/function/arguments").and_then(|v| v.as_str()) {
                         entry.1.push_str(a);
@@ -472,28 +532,35 @@ pub fn ask_ollama(app: &AppHandle, state: &Arc<AppState>, transcript: &str) {
         Ok(()) => {
             // Native tool calls, accumulated from deltas.
             if !tool_acc.is_empty() {
-                let mut voice = String::new();
+                let mut text_voice = String::new();
+                let mut override_voice = String::new();
                 for (name, args_raw) in tool_acc.values() {
                     let args: Value = serde_json::from_str(args_raw).unwrap_or(json!({}));
-                    if voice.is_empty() {
+                    if text_voice.is_empty() {
                         if let Some(t) = args.get("text").and_then(|t| t.as_str()) {
-                            voice = t.to_string();
+                            text_voice = t.to_string();
                         }
                     }
-                    if let Some(override_text) = apply_action(app, state, &registry, name, &args) {
-                        if voice.is_empty() {
-                            voice = override_text;
+                    if let Some(ov) = apply_action(app, state, &registry, name, &args) {
+                        if override_voice.is_empty() {
+                            override_voice = ov;
                         }
                     }
                 }
                 if let Some(tx) = session.take() {
-                    // Prose already streamed to the voice; just close it out.
+                    // Prose already streamed to the voice — close it out, but
+                    // an action override (e.g. "unknown worktree") is NEW
+                    // information the prose can't have covered: speak it.
                     if let Some(rest) = sbuf.flush() {
                         let _ = tx.send(SpeechItem::Sentence { text: rest, workspace: None });
+                    }
+                    if !override_voice.is_empty() {
+                        let _ = tx.send(SpeechItem::Sentence { text: override_voice.clone(), workspace: None });
                     }
                     let _ = tx.send(SpeechItem::End);
                     state.history.lock().unwrap().push(json!({ "role": "assistant", "content": full }));
                 } else {
+                    let voice = if !override_voice.is_empty() { override_voice } else { text_voice };
                     state.history.lock().unwrap().push(json!({ "role": "assistant", "content": voice }));
                     if voice.is_empty() {
                         let _ = app.emit("speaking-done", ());
@@ -507,26 +574,28 @@ pub fn ask_ollama(app: &AppHandle, state: &Arc<AppState>, transcript: &str) {
 
             let text = full.trim().to_string();
 
-            // Inline text-tool (`switch_project {…}`) or bare JSON content.
+            // Inline text-tool (`switch_project {…}`), bare JSON, or
+            // prose-then-JSON content. If some prose already streamed to a
+            // session before suppression kicked in, close that session first —
+            // the action confirmation will be spoken separately after it.
             if suppressed && !text.is_empty() {
+                if let Some(tx) = session.take() {
+                    let _ = tx.send(SpeechItem::End);
+                }
                 let re = Regex::new(r"(?s)^(\w+)\s*(\{.*\})\s*$").unwrap();
                 let voice = if let Some(caps) = re.captures(&text) {
                     if let Ok(args) = serde_json::from_str::<Value>(&caps[2]) {
                         let tool_name = caps[1].to_string();
-                        let mut v = args
+                        let text_v = args
                             .get("text")
                             .and_then(|t| t.as_str())
                             .unwrap_or("")
                             .to_string();
-                        if let Some(override_text) =
-                            apply_action(app, state, &registry, &tool_name, &args)
-                        {
-                            if v.is_empty() {
-                                v = override_text;
-                            }
-                        }
+                        let override_v = apply_action(app, state, &registry, &tool_name, &args);
                         println!("[vox] text-tool response: {tool_name}");
-                        v
+                        // Override = the action failed; it outranks the
+                        // model's optimistic confirmation.
+                        override_v.unwrap_or(text_v)
                     } else {
                         execute_parsed(app, state, &registry, parse_json(&text))
                     }
@@ -566,12 +635,28 @@ pub fn ask_ollama(app: &AppHandle, state: &Arc<AppState>, transcript: &str) {
             // Empty response — fall through to attempt 2.
         }
         Err(e) => {
-            eprintln!("[vox] tools stream failed, using JSON prompt: {e}");
-            // A session can only exist if data streamed, which implies Ok —
-            // but close defensively so the pill never sticks in 'speaking'.
-            if let Some(tx) = session.take() {
-                let _ = tx.send(SpeechItem::End);
+            eprintln!("[vox] tools stream failed: {e}");
+            // If part of the reply was already spoken, close it out as a
+            // truncated answer — running attempt 2 on top would speak a
+            // SECOND, differently-worded reply after the first one.
+            if session.is_some() || !full.trim().is_empty() {
+                if let Some(rest) = sbuf.flush() {
+                    let tx = session.get_or_insert_with(|| {
+                        speech::start_session(app.clone(), state.clone())
+                    });
+                    let _ = tx.send(SpeechItem::Sentence { text: rest, workspace: None });
+                }
+                if let Some(tx) = session.take() {
+                    let _ = tx.send(SpeechItem::End);
+                }
+                state
+                    .history
+                    .lock()
+                    .unwrap()
+                    .push(json!({ "role": "assistant", "content": full }));
+                return;
             }
+            eprintln!("[vox] no data streamed — trying JSON prompt fallback");
         }
     }
 
@@ -664,7 +749,9 @@ fn parse_json(raw: &str) -> Value {
         eprintln!("[vox] JSON malformed, extracted text field via regex");
         return json!({ "action": "none", "text": caps[1].replace("\\n", " ") });
     }
-    if !s.starts_with('{') && !s.starts_with('[') {
+    // Anything still containing a '{' at this point is a broken JSON/tool
+    // attempt (e.g. truncated by max_tokens) — never read that aloud.
+    if !s.contains('{') && !s.starts_with('[') {
         return json!({ "action": "none", "text": s });
     }
     eprintln!("[vox] unparseable response, suppressing TTS");

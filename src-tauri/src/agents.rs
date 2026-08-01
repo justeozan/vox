@@ -51,8 +51,10 @@ pub fn spawn_agent_in(app: &AppHandle, state: &Arc<AppState>, cwd: &str, task: &
     let state = state.clone();
     let task = task.to_string();
     std::thread::spawn(move || {
+        // `--` so a drafted prompt starting with '-' (bullet lists!) can't be
+        // parsed as a CLI flag.
         let spawned = Command::new(&claude)
-            .args(["--print", "--dangerously-skip-permissions", &task])
+            .args(["--print", "--dangerously-skip-permissions", "--", &task])
             .current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
