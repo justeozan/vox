@@ -384,12 +384,6 @@ async fn voice_input(
     .map_err(|e| e.to_string())
 }
 
-/// TEMP diagnostic: surface renderer-side mic details to stdout.
-#[tauri::command]
-fn devlog(msg: String) {
-    println!("[vox][devlog] {msg}");
-}
-
 #[tauri::command]
 fn audio_done(state: tauri::State<'_, Arc<AppState>>, id: u64) {
     let mut guard = state.audio_done.lock().unwrap();
@@ -590,7 +584,6 @@ pub fn run() {
             probe_setup,
             run_setup,
             voice_input,
-            devlog,
             audio_done,
             resize_window,
             interrupt,
