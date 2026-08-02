@@ -1,5 +1,18 @@
+# Dependencies
 node_modules/
-.gstack/
-test
+
+# Rust / Tauri build output
 src-tauri/target/
+
+# Local agent tooling & scratch (not part of the app)
+.claude/
+.context/
+.gstack/
+
+# Build assets that are generated, not sourced
 scripts/icon-src.png
+
+# macOS / editor cruft
+.DS_Store
+*.swp
+test

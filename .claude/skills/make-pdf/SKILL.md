@@ -1,1 +1,0 @@
-/Users/spectre/conductor/repos/vox/.claude/skills/gstack/make-pdf/SKILL.md
