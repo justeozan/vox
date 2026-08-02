@@ -3,9 +3,9 @@
 A floating voice pill for macOS that lets you talk to your [Conductor](https://conductor.build) worktrees instead of alt-tabbing between them.
 
 <p align="center">
-  <video src="docs/vox-demo.mp4" poster="docs/vox-demo-poster.jpg" controls muted loop playsinline width="600" alt="Vox demo"></video>
+  <img src="docs/vox-demo.gif" alt="Vox demo" width="600">
   <br>
-  <em>Demo — <a href="docs/vox-demo.mp4">download the mp4</a> if the player doesn't load.</em>
+  <em>Demo — <a href="docs/vox-demo.mp4">watch the full mp4</a> for higher quality.</em>
 </p>
 
 ## What it does
