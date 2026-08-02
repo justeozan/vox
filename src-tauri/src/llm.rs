@@ -237,7 +237,15 @@ fn apply_action(
     match name {
         "launch_agent" => {
             if let Some(task) = args.get("task").and_then(|t| t.as_str()) {
-                crate::agents::spawn_agent(app, state, task);
+                // spawn_agent emits `delegation` itself once the agent actually
+                // starts; a false return means it never launched.
+                if !crate::agents::spawn_agent(app, state, task) {
+                    return Some(if en {
+                        "I couldn't launch the agent — is the Claude CLI installed?".into()
+                    } else {
+                        "Je n'ai pas pu lancer l'agent — le CLI Claude est-il installé ?".into()
+                    });
+                }
             }
             None
         }
@@ -253,9 +261,19 @@ fn apply_action(
             }
             match crate::conductor::find_workspace_path(project) {
                 Some(path) => {
-                    println!("[vox] prompting worktree {project} at {path}");
-                    crate::agents::spawn_agent_in(app, state, &path, prompt);
-                    None
+                    // spawn_agent_in echoes the exact prompt to the UI (the
+                    // `delegation` event) only once the agent really starts, and
+                    // returns false if it couldn't launch — so we never confirm
+                    // a delegation that never happened.
+                    if crate::agents::spawn_agent_in(app, state, project, &path, prompt) {
+                        None
+                    } else {
+                        Some(if en {
+                            "I found the worktree but couldn't launch the agent.".into()
+                        } else {
+                            "J'ai trouvé le worktree mais je n'ai pas pu lancer l'agent.".into()
+                        })
+                    }
                 }
                 None => Some(if en {
                     format!("I can't find the worktree \"{project}\".")
