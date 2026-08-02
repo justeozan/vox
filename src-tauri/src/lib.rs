@@ -151,6 +151,43 @@ pub struct AppState {
     pub speak_lock: Mutex<()>,
 }
 
+// ── Microphone permission (macOS TCC) ────────────────────────────────────────
+// WKWebView's getUserMedia returns a "live" track but delivers SILENCE until the
+// host app holds a TCC microphone grant — wry auto-grants at the WebKit layer
+// yet never fires the OS prompt, so the mic sandbox extension can't be created
+// ("Could not create a 'com.apple.webkit.microphone' sandbox extension"). We
+// trigger the real prompt ourselves via AVFoundation; once the user allows it
+// (persisted against our stable app.vox.bar signature), the webview mic works.
+#[cfg(target_os = "macos")]
+fn request_microphone_access() {
+    use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSString;
+
+    unsafe {
+        // AVMediaTypeAudio is the string constant "soun".
+        let audio_type = NSString::from_str("soun");
+        let cls = class!(AVCaptureDevice);
+        // AVAuthorizationStatus: 0=notDetermined 1=restricted 2=denied 3=authorized
+        let status: isize = msg_send![cls, authorizationStatusForMediaType: &*audio_type];
+        println!("[vox] microphone TCC status = {status} (0=undetermined 1=restricted 2=denied 3=authorized)");
+        if status == 3 {
+            return;
+        }
+        if status == 2 {
+            eprintln!("[vox] microphone DENIED — enable it in System Settings › Privacy & Security › Microphone");
+            return;
+        }
+        // notDetermined → fire the prompt. Heap block: the callback runs later,
+        // after this fn returns, so a stack block would be freed too early.
+        let handler: RcBlock<dyn Fn(Bool)> = RcBlock::new(|granted: Bool| {
+            println!("[vox] microphone access granted = {}", granted.as_bool());
+        });
+        let _: () = msg_send![cls, requestAccessForMediaType: &*audio_type, completionHandler: &*handler];
+    }
+}
+
 // ── Window frame animation ───────────────────────────────────────────────────
 // Bottom-anchored, horizontally centered grow/shrink. Stepped resize with
 // ease-out cubic — runs off the main thread, each step dispatches to AppKit.
@@ -557,6 +594,11 @@ pub fn run() {
         ])
         .setup(move |app| {
             println!("[vox] starting pid={}", std::process::id());
+
+            // Prompt for microphone access up front so the webview mic isn't a
+            // silent stream (see request_microphone_access).
+            #[cfg(target_os = "macos")]
+            request_microphone_access();
 
             // Floating accessory — no dock icon, follows every Space.
             #[cfg(target_os = "macos")]

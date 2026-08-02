@@ -372,13 +372,21 @@
     color: rgba(255,255,255,0.95);
     white-space: nowrap;
     overflow: hidden;
-    text-overflow: ellipsis;
     opacity: 0;
     transition: opacity 0.35s ease;
     text-shadow: 0 1px 8px rgba(0,0,0,0.4);
     z-index: 2;
   }
   .transcript.visible { opacity: 1; }
+  /* Inner scroller: holds the letters + caret and pans left when the line is
+     wider than the pill, so long text reads through instead of clipping. */
+  .transcript .transcript-inner {
+    display: inline-block;
+    white-space: nowrap;
+    will-change: transform;
+  }
+  /* Delegation echo (what Vox actually prompted a worktree) — violet accent. */
+  .transcript.deleg { color: #d6c9ff; }
   .transcript .ch {
     display: inline-block;
     opacity: 0;
@@ -798,39 +806,70 @@ function animateWaveform(s) {
 // ── Transcript reveal ─────────────────────────────────────────────────────────
 const transcriptEl = document.getElementById('transcript')
 let transcriptHideTimer = null
+let transcriptScrollAnim = null
 
-function showTranscript(text, holdMs = 8000) {
+// Show a line with a per-letter reveal (the "highlight"). If it's wider than
+// the pill, pan it left-to-right after the reveal so the whole thing reads
+// through instead of being clipped with an ellipsis. `deleg` gives the violet
+// "here's what I prompted the agent" styling.
+function showTranscript(text, holdMs = 8000, { deleg = false } = {}) {
   clearTimeout(transcriptHideTimer)
   transcriptHideTimer = null
+  if (transcriptScrollAnim) { transcriptScrollAnim.cancel(); transcriptScrollAnim = null }
   transcriptEl.innerHTML = ''
+  transcriptEl.classList.toggle('deleg', deleg)
 
-  const MAX = 95
+  // Generous cap (long advice/prompts now scroll rather than clip); the ellipsis
+  // only guards against pathological lengths.
+  const MAX = 320
   const clipped = text.length > MAX ? text.slice(0, MAX - 1).trimEnd() + '…' : text
 
-  const frag = document.createDocumentFragment()
+  const inner = document.createElement('span')
+  inner.className = 'transcript-inner'
   const chars = [...clipped]
-  const perChar = Math.max(13, Math.min(34, 900 / Math.max(chars.length, 1)))
+  const perChar = Math.max(9, Math.min(34, 900 / Math.max(chars.length, 1)))
   chars.forEach((ch, i) => {
     const span = document.createElement('span')
     span.className = 'ch' + (ch === ' ' ? ' sp' : '')
     span.textContent = ch === ' ' ? ' ' : ch
     span.style.animationDelay = (i * perChar) + 'ms'
-    frag.appendChild(span)
+    inner.appendChild(span)
   })
   const caret = document.createElement('span')
   caret.className = 'caret'
-  frag.appendChild(caret)
+  inner.appendChild(caret)
 
-  transcriptEl.appendChild(frag)
+  transcriptEl.appendChild(inner)
   transcriptEl.classList.add('visible')
   bodyClasses()
-  // holdMs = 0 → no auto-hide (live speech: the next sentence or the
-  // speaking-done handler decides).
-  if (holdMs > 0) transcriptHideTimer = setTimeout(hideTranscript, holdMs)
+
+  // After the reveal, if it overflows, pan the inner span left so the tail
+  // scrolls into view (left→right reading), keeping the letter highlight. The
+  // auto-hide is set here (not synchronously) so it can be stretched to let the
+  // scroll finish — otherwise a long line is clipped mid-pan, defeating it.
+  const revealMs = chars.length * perChar
+  const armHide = (ms) => { if (ms > 0) transcriptHideTimer = setTimeout(hideTranscript, ms) }
+  requestAnimationFrame(() => {
+    const overflow = inner.scrollWidth - transcriptEl.clientWidth
+    if (overflow > 6) {
+      const delay = revealMs + 650
+      const panMs = Math.min(11000, Math.max(2600, overflow * 20))
+      transcriptScrollAnim = inner.animate(
+        [{ transform: 'translateX(0)' }, { transform: `translateX(${-overflow}px)` }],
+        { duration: panMs, delay, easing: 'cubic-bezier(0.33,0,0.2,1)', fill: 'forwards' }
+      )
+      // Keep it up long enough to read the tail (+ a beat), never shorter than
+      // the caller asked for.
+      armHide(holdMs > 0 ? Math.max(holdMs, delay + panMs + 900) : 0)
+    } else {
+      armHide(holdMs)
+    }
+  })
 }
 
 function hideTranscript() {
   transcriptEl.classList.remove('visible')
+  if (transcriptScrollAnim) { transcriptScrollAnim.cancel(); transcriptScrollAnim = null }
   clearTimeout(transcriptHideTimer)
   transcriptHideTimer = null
   voxIsShowing = false
@@ -869,7 +908,7 @@ async function activateVox() {
     setState('active')
     vadTick()
   } catch (err) {
-    console.error('[vox] activateVox failed:', err.message)
+    console.error('[vox] activateVox failed:', err.name, err.message)
   }
 }
 
@@ -1404,7 +1443,12 @@ listen('speaking-done', () => {
     setState(micStream ? 'active' : (agentCount > 0 ? 'running' : 'idle'))
   }
   if (carouselOpen) closeCarousel(1400)
-  if (transcriptEl.classList.contains('visible')) {
+  // Just delegated? Bring the exact prompt back up (scrolls if long) so you can
+  // read/verify what was sent — outlives the short spoken confirmation.
+  if (lastDelegation && Date.now() - lastDelegation.at < 20000) {
+    showTranscript(lastDelegation.text, 24000, { deleg: true })
+    lastDelegation = null
+  } else if (transcriptEl.classList.contains('visible')) {
     clearTimeout(transcriptHideTimer)
     // Vox's last sentence (usually the recommendation) stays readable for a
     // while; the user's own words fade quickly as before.
@@ -1475,6 +1519,32 @@ listen('speaking-text', (e) => {
   if (!t) return
   voxIsShowing = true
   showTranscript(t, 0)
+})
+
+// What Vox actually dispatched to a worktree agent — shown verbatim (scrolls
+// if long) so you can verify the exact prompt that was sent. The agent's file
+// changes then show up in that worktree's diff inside Conductor.
+let lastDelegation = null
+listen('delegation', (e) => {
+  const p = e.payload || {}
+  const proj = p.project || '?'
+  const prompt = (p.prompt || '').trim()
+  if (!prompt) return
+  // Show it now for instant feedback; the spoken confirmation will briefly
+  // replace it, then speaking-done brings the full prompt back (scrolling).
+  lastDelegation = { text: '→ ' + proj + ' — ' + prompt, at: Date.now() }
+  voxIsShowing = false
+  showTranscript(lastDelegation.text, 0, { deleg: true })
+  highlightWorkspace(proj)
+})
+
+// Agent failed to even launch — surface it instead of failing silently, and
+// drop any pending delegation echo so speaking-done can't re-show it as success.
+listen('agent-error', (e) => {
+  const msg = (e.payload && e.payload.message) || 'agent launch failed'
+  lastDelegation = null
+  voxIsShowing = false
+  showTranscript('⚠ ' + msg, 7000)
 })
 
 listen('startup-brief-starting', () => {
