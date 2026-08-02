@@ -1,5 +1,11 @@
 # Vox
 
+[![CI](https://github.com/justeozan/vox/actions/workflows/ci.yml/badge.svg)](https://github.com/justeozan/vox/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/justeozan/vox?sort=semver)](https://github.com/justeozan/vox/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Platform: macOS](https://img.shields.io/badge/platform-macOS%2012%2B%20(Apple%20Silicon)-black?logo=apple)
+![Local-first](https://img.shields.io/badge/local--first-no%20cloud%2C%20no%20API%20keys-brightgreen)
+
 A floating voice pill for macOS that lets you talk to your [Conductor](https://conductor.build) worktrees instead of alt-tabbing between them.
 
 <p align="center">
@@ -124,6 +130,16 @@ The GitHub Actions release workflow (`.github/workflows/release.yml`) additional
 - Deeper multi-agent orchestration — threading the ongoing voice conversation into follow-up prompts across several agents at once.
 - True auto-update — today Cmd+, only checks the latest GitHub release and opens the download page; no in-place install yet.
 - Windows/Linux, maybe — the pill's native blur depends on `NSVisualEffectView`, which is macOS-only, so this isn't a near-term priority.
+
+## Contributing
+
+Issues and PRs are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup
+(including the microphone‑in‑dev gotcha and `scripts/dev-bundle.sh`), and the
+[Code of Conduct](CODE_OF_CONDUCT.md). For anything security‑related, please
+follow [SECURITY.md](SECURITY.md) rather than opening a public issue.
+
+Vox is **local‑first** by design — no cloud calls, no API keys, no telemetry —
+so please keep contributions on‑device.
 
 ## License
 
