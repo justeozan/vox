@@ -468,6 +468,103 @@
   /* Hover: everything breathes a little wider */
   .bar > * { transition: transform 0.3s var(--smooth); }
   body.hovered .bar { gap: 13px; }
+
+  /* ── Setup panel (first-run auto-install) ───────────────────────────────
+     Bottom-anchored like settings; setup wins over settings + carousel. */
+  .setup {
+    display: none;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 16px 22px 4px 22px;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+  body.setup-open .setup {
+    display: flex;
+    animation: settingsIn 0.3s var(--smooth) forwards;
+  }
+  body.setup-open .settings { display: none; }
+  body.setup-open .carousel { display: none; }
+
+  .setup-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .setup-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.5);
+  }
+  .setup-status { font-size: 10px; color: rgba(255,255,255,0.35); }
+  .setup-status.busy { color: rgba(167,139,250,0.8); }
+  .setup-status.ok   { color: rgba(74,222,128,0.85); }
+  .setup-status.bad  { color: rgba(248,113,113,0.85); }
+
+  .setup-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+  .setup-chip {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 9px;
+    border-radius: 9px;
+    border: 1px solid rgba(255,255,255,0.07);
+    background: rgba(255,255,255,0.03);
+    font-size: 11px;
+    color: rgba(255,255,255,0.7);
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .setup-chip .sdot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #5a5a64; flex-shrink: 0;
+    transition: background 0.3s, box-shadow 0.3s;
+  }
+  .setup-chip.ok .sdot { background: var(--green); box-shadow: 0 0 6px rgba(74,222,128,0.5); }
+  .setup-chip.miss .sdot { background: #f87171; box-shadow: 0 0 6px rgba(248,113,113,0.6); }
+  .setup-chip .sname { flex-shrink: 0; }
+  .setup-chip .sdetail {
+    font-size: 9.5px;
+    color: rgba(255,255,255,0.35);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .setup-log {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    background: rgba(0,0,0,0.35);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 10px;
+    padding: 9px 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 10.5px;
+    line-height: 1.55;
+    color: rgba(255,255,255,0.6);
+    white-space: pre-wrap;
+    word-break: break-word;
+    scrollbar-width: none;
+  }
+  .setup-log::-webkit-scrollbar { display: none; }
+  .setup-log .ln-tag { color: var(--violet); opacity: 0.6; margin-right: 6px; }
+
+  .setup-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 12px;
+    padding-bottom: 2px;
+  }
 </style>
 </head>
 <body>
@@ -499,6 +596,22 @@
     <div class="setting-row">
       <div class="setting-label" id="lbl-update">Mises à jour</div>
       <button class="update-btn" id="update-btn">Vérifier</button>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label" id="lbl-setup">Installation</div>
+      <button class="update-btn" id="setup-repair-btn">Vérifier</button>
+    </div>
+  </div>
+
+  <div class="setup" id="setup">
+    <div class="setup-header">
+      <div class="setup-title" id="setup-title">installation</div>
+      <div class="setup-status" id="setup-status">—</div>
+    </div>
+    <div class="setup-grid" id="setup-grid"></div>
+    <div class="setup-log" id="setup-log"></div>
+    <div class="setup-actions">
+      <button class="update-btn" id="setup-btn">Installer</button>
     </div>
   </div>
 
@@ -549,6 +662,7 @@ const SPEECH_SNR         = 2.2
 const SIZE_BASE     = [480, 56]
 const SIZE_HOVER    = [548, 56]  // room for BOTH hover buttons (recap + gear)
 const SIZE_SETTINGS = [500, 396]
+const SIZE_SETUP    = [520, 470]
 
 // ── State machine ─────────────────────────────────────────────────────────────
 let state = 'idle'
@@ -558,6 +672,9 @@ let carouselOpen = false
 let carouselCloseTimer = null
 let hovered = false
 let uiLang = 'fr'
+let setupOpen = false
+let setupRunning = false
+let setupInitiated = false
 
 const LABEL_TABLE = {
   fr: {
@@ -567,6 +684,9 @@ const LABEL_TABLE = {
     settingsTitle: 'paramètres', model: 'Modèle', lang: 'Langue',
     version: 'Version', update: 'Mises à jour',
     check: 'Vérifier', checking: '…', upToDate: 'À jour', download: 'Télécharger',
+    setupTitle: 'installation', setupInstall: 'Installer', setupDone: 'Terminé',
+    setupRetry: 'Réessayer', setupStatusBusy: 'installation en cours…',
+    setupStatusOk: 'prêt', setupStatusFail: 'échec — réessayez', repair: 'Vérifier',
   },
   en: {
     idle: '⌥ space', active: 'listening', listening: 'I hear you…',
@@ -575,7 +695,19 @@ const LABEL_TABLE = {
     settingsTitle: 'settings', model: 'Model', lang: 'Language',
     version: 'Version', update: 'Updates',
     check: 'Check', checking: '…', upToDate: 'Up to date', download: 'Download',
+    setupTitle: 'setup', setupInstall: 'Install', setupDone: 'Done',
+    setupRetry: 'Retry', setupStatusBusy: 'installing…',
+    setupStatusOk: 'ready', setupStatusFail: 'failed — retry', repair: 'Check',
   },
+}
+
+const COMP_LABELS = {
+  fr: { python: 'Python', ffmpeg: 'ffmpeg', espeakNg: 'espeak-ng', ollama: 'Ollama',
+        venv: 'venv', whisper: 'Whisper', kokoro: 'Kokoro', piper: 'Piper',
+        piperVoice: 'Voix Piper' },
+  en: { python: 'Python', ffmpeg: 'ffmpeg', espeakNg: 'espeak-ng', ollama: 'Ollama',
+        venv: 'venv', whisper: 'Whisper', kokoro: 'Kokoro', piper: 'Piper',
+        piperVoice: 'Piper voice' },
 }
 
 const labelEl = document.getElementById('label')
@@ -599,6 +731,7 @@ function setLabel(text) {
 
 function bodyClasses() {
   document.body.className = state
+    + (setupOpen ? ' setup-open' : '')
     + (settingsOpen ? ' settings-open' : '')
     + (carouselOpen ? ' carousel-open' : '')
     + (hovered ? ' hovered' : '')
@@ -870,6 +1003,8 @@ function interruptSpeech() {
 }
 
 async function toggleVox() {
+  // During first-run setup the pill only shows install progress.
+  if (setupOpen) return
   // ⌥Space stops the startup recap (boot) or a reply being spoken (speaking).
   // 'thinking' stays a no-op: interrupting an in-flight LLM call and letting a
   // new turn start would race the abandoned reply onto the voice.
@@ -887,7 +1022,9 @@ async function toggleVox() {
 // ── Window sizing (hover grow / settings / carousel) ─────────────────────────
 function syncWindow() {
   let w, h
-  if (settingsOpen) {
+  if (setupOpen) {
+    ;[w, h] = SIZE_SETUP
+  } else if (settingsOpen) {
     ;[w, h] = SIZE_SETTINGS
   } else if (carouselOpen) {
     const cards = carouselEl.children.length
@@ -984,6 +1121,133 @@ document.body.addEventListener('mouseleave', () => {
   }, 140)
 })
 
+// ── Setup panel (first-run auto-install) ─────────────────────────────────────
+const setupGrid = document.getElementById('setup-grid')
+const setupLog = document.getElementById('setup-log')
+const setupBtn = document.getElementById('setup-btn')
+const setupStatus = document.getElementById('setup-status')
+
+function renderSetup(probe) {
+  const labels = COMP_LABELS[uiLang] || COMP_LABELS.fr
+  setupGrid.innerHTML = ''
+  const comps = (probe && probe.components) || {}
+  for (const key of Object.keys(COMP_LABELS.fr)) {
+    const c = comps[key]
+    if (!c) continue
+    const chip = document.createElement('div')
+    chip.className = 'setup-chip ' + (c.ok ? 'ok' : 'miss')
+    const dot = document.createElement('span'); dot.className = 'sdot'
+    const name = document.createElement('span'); name.className = 'sname'
+    name.textContent = labels[key]
+    const detail = document.createElement('span'); detail.className = 'sdetail'
+    detail.textContent = (c.detail && c.detail !== 'ok') ? c.detail : ''
+    detail.title = c.detail || ''
+    chip.append(dot, name, detail)
+    setupGrid.appendChild(chip)
+  }
+}
+
+function appendLog(tag, line) {
+  const row = document.createElement('div')
+  const t = document.createElement('span')
+  t.className = 'ln-tag'
+  t.textContent = tag
+  row.append(t, document.createTextNode(line))
+  setupLog.appendChild(row)
+  setupLog.scrollTop = setupLog.scrollHeight
+}
+
+function setSetupStatus(cls, text) {
+  setupStatus.className = 'setup-status' + (cls ? ' ' + cls : '')
+  setupStatus.textContent = text
+}
+
+function setSetupBtn(text, running) {
+  setupBtn.textContent = text
+  setupBtn.disabled = !!running
+}
+
+function renderSetupI18n() {
+  const labels = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+  document.getElementById('setup-title').textContent = labels.setupTitle
+  document.getElementById('lbl-setup').textContent = labels.repair
+  if (!setupRunning) setSetupBtn(labels.setupInstall, false)
+  renderSetup(lastProbe)
+}
+let lastProbe = null
+
+function openSetup() {
+  if (settingsOpen) {
+    settingsOpen = false
+  }
+  carouselOpen = false
+  setupOpen = true
+  bodyClasses()
+  syncWindow()
+}
+
+function closeSetup() {
+  if (!setupOpen) return
+  setupOpen = false
+  bodyClasses()
+  syncWindow()
+}
+
+async function startSetup() {
+  if (setupRunning) return
+  setupRunning = true
+  const labels = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+  setSetupBtn(labels.setupInstall, true)
+  setSetupStatus('busy', labels.setupStatusBusy)
+  setupLog.innerHTML = ''
+  try {
+    const probe = await invoke('run_setup')
+    setupRunning = false
+    lastProbe = probe
+    renderSetup(probe)
+    if (!probe.needsSetup) {
+      setSetupStatus('ok', labels.setupStatusOk)
+      setSetupBtn(labels.setupDone, false)
+      setTimeout(closeSetup, 2200)
+    } else {
+      setSetupStatus('bad', labels.setupStatusFail)
+      setSetupBtn(labels.setupRetry, false)
+    }
+  } catch (err) {
+    setupRunning = false
+    appendLog('setup', String(err.message || err))
+    setSetupStatus('bad', labels.setupStatusFail)
+    setSetupBtn(labels.setupRetry, false)
+  }
+}
+
+function maybeAutoSetup(probe) {
+  if (setupInitiated || !probe || !probe.needsSetup) return
+  setupInitiated = true
+  openSetup()
+  renderSetup(probe)
+  startSetup()
+}
+
+setupBtn.addEventListener('click', () => {
+  if (setupRunning) return
+  if (setupBtn.textContent === (LABEL_TABLE[uiLang] || LABEL_TABLE.fr).setupDone) {
+    closeSetup()
+    return
+  }
+  startSetup()
+})
+
+document.getElementById('setup-repair-btn').addEventListener('click', async () => {
+  openSetup()
+  try {
+    const probe = await invoke('probe_setup')
+    lastProbe = probe
+    renderSetup(probe)
+    if (probe.needsSetup) startSetup()
+  } catch {}
+})
+
 // ── Settings ──────────────────────────────────────────────────────────────────
 const modelSelect = document.getElementById('model-select')
 const langSegment = document.getElementById('lang-segment')
@@ -996,6 +1260,7 @@ function applyUiLang() {
   document.getElementById('lbl-version').textContent = labels.version
   document.getElementById('lbl-update').textContent = labels.update
   renderUpdateBtn()
+  renderSetupI18n()
   lastLabel = ''
   setLabel(labels[state] || '')
 }
@@ -1038,9 +1303,10 @@ updateBtn.addEventListener('click', async () => {
 
 async function openSettings() {
   if (settingsOpen) return
-  // Settings takes the panel space — retire the carousel instantly.
+  // Settings takes the panel space — retire the carousel and setup instantly.
   clearTimeout(carouselCloseTimer)
   carouselOpen = false
+  setupOpen = false
   settingsOpen = true
   bodyClasses()
   syncWindow()
@@ -1112,6 +1378,15 @@ langSegment.addEventListener('click', (e) => {
 // ── Events from Rust ─────────────────────────────────────────────────────────
 listen('toggle-listening', toggleVox)
 listen('toggle-settings', toggleSettings)
+
+listen('setup-needed', (e) => {
+  lastProbe = e.payload
+  maybeAutoSetup(e.payload)
+})
+
+listen('setup-log', (e) => {
+  appendLog(e.payload.tag || 'setup', e.payload.line || '')
+})
 
 listen('speaking-start', () => {
   ttsStartedAt = Date.now()
@@ -1223,6 +1498,15 @@ listen('startup-brief-starting', () => {
   } catch {}
   applyUiLang()
   setState('idle')
+
+  // First-run setup: if the speech stack is incomplete, open the panel and
+  // auto-install. Daemons stay down until run_setup completes (Rust restarts
+  // them and emits no startup brief before then).
+  try {
+    const probe = await invoke('probe_setup')
+    lastProbe = probe
+    maybeAutoSetup(probe)
+  } catch {}
 })()
 
 console.log('[vox renderer] ready — ⌥Space to talk, ⌘, or gear for settings')
