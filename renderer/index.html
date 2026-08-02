@@ -843,12 +843,19 @@ let pcmChunks = [], isRecording = false, currentAudio = null
 let ttsStartedAt = null, silenceTimer = null, rafVAD = null, speechOnsetAt = null
 let ambientRMS = SPEECH_THRESHOLD * 0.5
 
+const devlog = (m) => { try { invoke('devlog', { msg: String(m) }) } catch {} }
+
 async function activateVox() {
   if (micStream) return
   try {
+    devlog('getUserMedia: requesting…')
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     })
+    const tr = micStream.getAudioTracks()[0]
+    devlog('getUserMedia OK — tracks=' + micStream.getAudioTracks().length
+      + ' label="' + (tr && tr.label) + '" muted=' + (tr && tr.muted)
+      + ' enabled=' + (tr && tr.enabled) + ' state=' + (tr && tr.readyState))
     if (!audioCtx || audioCtx.state === 'closed') {
       audioCtx = new AudioContext({ sampleRate: 16000 })
     } else if (audioCtx.state === 'suspended') {
@@ -868,7 +875,16 @@ async function activateVox() {
     processor.connect(audioCtx.destination)
     setState('active')
     vadTick()
+    // Probe actual signal level for 2s — a silent (all-zero) stream means the
+    // mic sandbox extension failed even though getUserMedia "succeeded".
+    let peak = 0, samples = 0
+    const probe = setInterval(() => {
+      if (!analyser) { clearInterval(probe); return }
+      const r = getRMS(); peak = Math.max(peak, r); samples++
+      if (samples >= 20) { clearInterval(probe); devlog('mic level over 2s — peak RMS=' + peak.toFixed(5) + (peak < 1e-4 ? ' (SILENT STREAM)' : ' (audio flowing)')) }
+    }, 100)
   } catch (err) {
+    devlog('getUserMedia FAILED: ' + err.name + ' — ' + err.message)
     console.error('[vox] activateVox failed:', err.message)
   }
 }
