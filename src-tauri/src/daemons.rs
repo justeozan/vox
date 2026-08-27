@@ -19,6 +19,8 @@ pub struct DaemonHandle {
     stdin: ChildStdin,
     rx: Receiver<String>,
     ready: Arc<AtomicBool>,
+    /// Consecutive request timeouts; two in a row marks the daemon unhealthy.
+    timeouts: u32,
 }
 
 impl DaemonHandle {
@@ -30,6 +32,12 @@ impl DaemonHandle {
         on_ready: Option<Box<dyn Fn() + Send>>,
     ) -> std::io::Result<DaemonHandle> {
         let mut cmd = Command::new(python);
+        // Don't let Python drop __pycache__ next to the bundled scripts: in dev
+        // that directory lives under src-tauri/resources, which Tauri's file
+        // watcher treats as a source change — daemon starts, writes bytecode,
+        // watcher rebuilds, daemon restarts, forever. It also keeps the shipped
+        // bundle free of stale .pyc files.
+        cmd.env("PYTHONDONTWRITEBYTECODE", "1");
         cmd.arg(script)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -62,6 +70,13 @@ impl DaemonHandle {
                     let _ = tx.send(line);
                 }
             }
+            // EOF on stdout means the python process is gone. Clearing `ready`
+            // is what makes that survivable: `synthesize_daemon` short-circuits
+            // on !is_ready() in microseconds, so Vox degrades to `say`. Left
+            // set, every sentence would instead write into a dead pipe and
+            // block the full 15s request timeout first — a five-sentence recap
+            // becomes 75 seconds of near-silence.
+            ready2.store(false, Ordering::SeqCst);
             println!("[vox] {tag} daemon exited");
         });
         std::thread::spawn(move || {
@@ -71,7 +86,7 @@ impl DaemonHandle {
             }
         });
 
-        Ok(DaemonHandle { child, stdin, rx, ready })
+        Ok(DaemonHandle { child, stdin, rx, ready, timeouts: 0 })
     }
 
     pub fn is_ready(&self) -> bool {
@@ -82,14 +97,44 @@ impl DaemonHandle {
     /// previously timed-out request can't satisfy this one.
     pub fn request(&mut self, line: &str, timeout: Duration) -> Option<String> {
         while self.rx.try_recv().is_ok() {}
-        writeln!(self.stdin, "{line}").ok()?;
-        self.stdin.flush().ok()?;
-        self.rx.recv_timeout(timeout).ok()
+        if writeln!(self.stdin, "{line}").is_err() || self.stdin.flush().is_err() {
+            // Broken pipe — the process is gone but its stdout thread may not
+            // have observed EOF yet. Mark it now so the next call is instant.
+            self.ready.store(false, Ordering::SeqCst);
+            return None;
+        }
+        match self.rx.recv_timeout(timeout) {
+            Ok(line) => {
+                self.timeouts = 0;
+                Some(line)
+            }
+            Err(_) => {
+                // Two, not one: a single genuinely slow sentence must not
+                // condemn a healthy daemon. Two in a row means it's wedged
+                // below the protocol layer (model hang, swap thrash) and every
+                // further request would just burn another full timeout.
+                self.timeouts += 1;
+                if self.timeouts >= 2 {
+                    eprintln!("[vox] daemon unresponsive after 2 timeouts — marking unhealthy");
+                    self.ready.store(false, Ordering::SeqCst);
+                }
+                None
+            }
+        }
     }
 
     pub fn kill(&mut self) {
+        self.ready.store(false, Ordering::SeqCst);
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+impl Drop for DaemonHandle {
+    /// Without this, an app crash orphans the python processes — and a resident
+    /// speech model holds hundreds of MB.
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
@@ -103,6 +148,33 @@ fn is_executable(p: &Path) -> bool {
         && p.metadata()
             .map(|m| m.permissions().mode() & 0o111 != 0)
             .unwrap_or(false)
+}
+
+/// EVERY executable with this name on the search path, in order.
+///
+/// `find_bin` returns only the first, which is wrong whenever the first match
+/// is unusable: `/usr/bin/python3` is Apple's 3.9 on every Mac and always wins
+/// the race, so a version check against it rejected the name outright and never
+/// looked at Homebrew's modern python further down the path.
+pub fn find_bins(name: &str, extra: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    dirs.extend_from_slice(extra);
+    let h = home();
+    dirs.push(h.join(".local/bin"));
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    dirs.push(PathBuf::from("/usr/bin"));
+    let mut seen = std::collections::HashSet::new();
+    dirs.into_iter()
+        .map(|d| d.join(name))
+        .filter(|p| is_executable(p))
+        .filter(|p| seen.insert(p.clone()))
+        .collect()
 }
 
 pub fn find_bin(name: &str, extra: &[PathBuf]) -> Option<PathBuf> {
@@ -211,6 +283,9 @@ pub fn init_paths(state: &Arc<AppState>, app: &AppHandle) {
     paths.stt_script = resource_script(app, "vox_stt.py");
     paths.tts_script = resource_script(app, "vox_tts.py");
     paths.tts_piper_script = resource_script(app, "vox_tts_piper.py");
+    paths.tts_qwen_script = resource_script(app, "vox_tts_qwen.py");
+    let qwen_py = h.join(".vox/venv-qwen/bin/python");
+    paths.tts_qwen_python = if is_executable(&qwen_py) { Some(qwen_py) } else { None };
 }
 
 pub fn start_stt(state: &Arc<AppState>) {
@@ -242,11 +317,26 @@ pub fn start_stt(state: &Arc<AppState>) {
 }
 
 pub fn start_tts(state: &Arc<AppState>, app: AppHandle) {
+    let engine = {
+        let s = state.settings.lock().unwrap();
+        crate::resolve_engine(&s)
+    };
+    start_tts_engine(state, app, engine);
+}
+
+/// Spawn one specific engine. Split out so a selected-but-unavailable engine
+/// can fall back to the language default instead of leaving Vox mute — the
+/// early return used to skip `on_ready`, which also silently killed the recap.
+fn start_tts_engine(state: &Arc<AppState>, app: AppHandle, engine: &'static str) {
     let lang = {
         let s = state.settings.lock().unwrap();
         lang_config(&s.language)
     };
+    let lang_code = lang.stt.to_string();
 
+    // Cloned before the closure takes ownership: the fallback path below still
+    // needs a handle to retry with another engine.
+    let app_retry = app.clone();
     let st = state.clone();
     let on_ready: Box<dyn Fn() + Send> = Box::new(move || {
         let st = st.clone();
@@ -257,7 +347,53 @@ pub fn start_tts(state: &Arc<AppState>, app: AppHandle) {
         });
     });
 
-    match lang.tts_engine {
+    match engine {
+        // No daemon at all, so `on_ready` never fires — kick the recap
+        // directly or `say` mode would silently lose it.
+        "say" => {
+            println!("[vox] TTS engine = say (no daemon)");
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(800));
+                on_ready();
+            });
+        }
+        "qwen3" => {
+            let (script, python) = {
+                let paths = state.paths.lock().unwrap();
+                match (&paths.tts_qwen_script, &paths.tts_qwen_python) {
+                    (Some(s), Some(p)) => (s.clone(), p.to_string_lossy().to_string()),
+                    _ => {
+                        let fallback = lang.tts_engine;
+                        eprintln!(
+                            "[vox] Qwen3 TTS not installed — falling back to {fallback} \
+                             (install it from the setup panel)"
+                        );
+                        drop(paths);
+                        start_tts_engine(state, app_retry, fallback);
+                        return;
+                    }
+                }
+            };
+            let venv = home().join(".vox/venv-qwen");
+            let envs = vec![
+                ("VIRTUAL_ENV".into(), venv.to_string_lossy().to_string()),
+                ("HF_HOME".into(), home().join(".vox/hf").to_string_lossy().to_string()),
+                ("VOX_TTS_LANG".into(), lang_code.clone()),
+                (
+                    "VOX_QWEN_MODEL".into(),
+                    std::env::var("VOX_QWEN_MODEL").unwrap_or_else(|_| crate::setup::QWEN_MODEL_ID.into()),
+                ),
+                (
+                    "VOX_QWEN_VOICE".into(),
+                    std::env::var("VOX_QWEN_VOICE").unwrap_or_else(|_| "Serena".into()),
+                ),
+            ];
+            println!("[vox] starting Qwen3 TTS daemon...");
+            match DaemonHandle::spawn(&python, &script, envs, "qwen3", Some(on_ready)) {
+                Ok(d) => *state.tts.lock().unwrap() = Some(d),
+                Err(e) => eprintln!("[vox] Qwen3 TTS daemon spawn failed: {e}"),
+            }
+        }
         "piper" => {
             let (script, python) = {
                 let paths = state.paths.lock().unwrap();
@@ -274,6 +410,7 @@ pub fn start_tts(state: &Arc<AppState>, app: AppHandle) {
             let envs = vec![
                 ("VIRTUAL_ENV".into(), venv.to_string_lossy().to_string()),
                 ("VOX_PIPER_MODEL".into(), model_path.to_string_lossy().to_string()),
+                ("VOX_TTS_LANG".into(), lang_code.clone()),
             ];
             println!("[vox] starting Piper TTS daemon ({})...", lang.piper_model);
             match DaemonHandle::spawn(&python, &script, envs, "piper", Some(on_ready)) {
@@ -281,7 +418,10 @@ pub fn start_tts(state: &Arc<AppState>, app: AppHandle) {
                 Err(e) => eprintln!("[vox] Piper TTS daemon spawn failed: {e}"),
             }
         }
-        _ => {
+        other => {
+            if other != "kokoro" {
+                eprintln!("[vox] unknown TTS engine {other:?} — falling back to Kokoro");
+            }
             let (script, python) = {
                 let paths = state.paths.lock().unwrap();
                 match (&paths.tts_script, &paths.tts_python) {
@@ -300,6 +440,7 @@ pub fn start_tts(state: &Arc<AppState>, app: AppHandle) {
                     "VOX_KOKORO_VOICE".into(),
                     std::env::var("VOX_KOKORO_VOICE").unwrap_or_else(|_| lang.kokoro_voice.to_string()),
                 ),
+                ("VOX_TTS_LANG".into(), lang_code.clone()),
             ];
             println!("[vox] starting Kokoro TTS daemon ({})...", lang.kokoro_voice);
             match DaemonHandle::spawn(&python, &script, envs, "kokoro", Some(on_ready)) {

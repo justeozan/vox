@@ -169,8 +169,20 @@ pub fn transcribe(state: &Arc<AppState>, wav: &Path) -> String {
 
 // ── TTS ──────────────────────────────────────────────────────────────────────
 
-/// Synthesize one sentence through the active TTS daemon (Kokoro or Piper —
-/// both speak the same line protocol).
+/// Is this fragment worth sending to a voice engine at all?
+///
+/// A bare path or a run of punctuation survives our own cleaning but is empty
+/// after the daemon's, and Piper answers `error:# channels not specified` — a
+/// hard failure that costs the full 15s request timeout and then falls back to
+/// `say`. Cheaper to never send it. Guarding here covers every producer at once
+/// (replies, the recap's LLM recommendation, announcements).
+pub fn is_speakable(text: &str) -> bool {
+    let t = text.trim();
+    t.chars().count() >= 4 && t.chars().filter(|c| c.is_alphabetic()).count() >= 3
+}
+
+/// Synthesize one sentence through the active TTS daemon (Kokoro, Piper or
+/// Qwen3 — they all speak the same line protocol).
 fn synthesize_daemon(state: &Arc<AppState>, text: &str) -> Option<PathBuf> {
     let mut guard = state.tts.lock().unwrap();
     let d = guard.as_mut()?;
@@ -214,21 +226,76 @@ enum PlayMsg {
     End,
 }
 
+/// How a speech session ended. Sent once, just before the session thread exits.
+pub struct SessionOutcome {
+    /// True iff the session emitted `speaking-start`, i.e. it actually made a
+    /// sound and put the renderer into a speaking state. A session cancelled
+    /// before its first sentence never does.
+    pub started: bool,
+    /// True iff the session drained its queue without being interrupted.
+    /// A `false` here is what makes an announcement re-queueable.
+    pub completed: bool,
+    /// Sentences actually played.
+    pub spoken: usize,
+}
+
 /// Begin a queued speech session. Push sentences on the returned channel as
 /// they become available and finish with `SpeechItem::End`. The session emits
 /// speaking-start before the first sound and exactly one speaking-done at the
 /// end, honors interrupt-generation cancellation at every step, and synthesizes one sentence
 /// ahead of playback.
 pub fn start_session(app: AppHandle, state: Arc<AppState>) -> Sender<SpeechItem> {
+    let (tx, done_rx) = start_session_full(app.clone(), state);
+    settle_on_silence(app, done_rx);
+    tx
+}
+
+/// Guarantee the renderer still settles when a session makes no sound at all.
+///
+/// `run_session` only emits `speaking-done` if it actually started speaking, so
+/// a session that produced nothing would leave the pill stuck in `thinking` /
+/// `boot`. This covers exactly that gap — and only that gap: when the session
+/// was CANCELLED the renderer has already settled itself (`interruptSpeech` and
+/// the barge-in path both call `setState` locally), so emitting there would
+/// yank a freshly-started turn back out of `thinking`.
+fn settle_on_silence(app: AppHandle, done_rx: Receiver<SessionOutcome>) {
+    std::thread::spawn(move || match done_rx.recv() {
+        Ok(o) if !o.started && o.completed => {
+            let _ = app.emit("speaking-done", ());
+        }
+        // The session thread died without reporting — settle rather than wedge.
+        Err(_) => {
+            let _ = app.emit("speaking-done", ());
+        }
+        _ => {}
+    });
+}
+
+/// Same as `start_session`, plus a channel reporting how the session ended.
+///
+/// Callers that need to know whether the speech actually landed (the
+/// announcement drainer re-queues on `completed == false`) take this variant —
+/// and then own the settling that `settle_on_silence` would otherwise do.
+pub fn start_session_full(
+    app: AppHandle,
+    state: Arc<AppState>,
+) -> (Sender<SpeechItem>, Receiver<SessionOutcome>) {
     // Capture the interrupt generation NOW: this session is cancelled iff the
     // user interrupts AFTER its creation. Past interrupts never bleed in.
     let gen = state.interrupt_gen.load(Ordering::SeqCst);
     let (tx, rx) = channel::<SpeechItem>();
-    std::thread::spawn(move || run_session(app, state, rx, gen));
-    tx
+    let (done_tx, done_rx) = channel::<SessionOutcome>();
+    std::thread::spawn(move || run_session(app, state, rx, gen, done_tx));
+    (tx, done_rx)
 }
 
-fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>, gen: u64) {
+fn run_session(
+    app: AppHandle,
+    state: Arc<AppState>,
+    rx: Receiver<SpeechItem>,
+    gen: u64,
+    done_tx: Sender<SessionOutcome>,
+) {
     // Serialize sessions — a second speak while one is running waits its turn.
     let _guard = state.speak_lock.lock().unwrap();
     let cancelled = |st: &Arc<AppState>| st.interrupt_gen.load(Ordering::SeqCst) != gen;
@@ -266,6 +333,13 @@ fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>, g
             match item {
                 SpeechItem::End => break,
                 SpeechItem::Sentence { text, workspace } => {
+                    // Drop it here, not in synthesize_daemon: a None there
+                    // falls back to `say`, which would read the raw fragment
+                    // aloud — exactly what we're avoiding.
+                    if !is_speakable(&text) {
+                        println!("[vox] (skipped unspeakable fragment: {text:?})");
+                        continue;
+                    }
                     println!("[vox] 🔊 {text}");
                     let spoken = apply_pronunciations(&text);
                     let msg = if use_daemon {
@@ -287,6 +361,7 @@ fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>, g
 
     // Play stage.
     let mut started = false;
+    let mut spoken = 0usize;
     for msg in prx {
         let interrupted = cancelled(&state);
         match msg {
@@ -319,6 +394,7 @@ fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>, g
                 let _ = rx_done.recv_timeout(Duration::from_secs(120));
                 *state.audio_done.lock().unwrap() = None;
                 let _ = std::fs::remove_file(&path);
+                spoken += 1;
             }
             PlayMsg::Say { text, display } => {
                 if interrupted {
@@ -333,11 +409,20 @@ fn run_session(app: AppHandle, state: Arc<AppState>, rx: Receiver<SpeechItem>, g
                     serde_json::json!({ "text": display, "workspace": null }),
                 );
                 say_fallback(&state, &text);
+                spoken += 1;
             }
         }
     }
     let _ = synth.join();
-    let _ = app.emit("speaking-done", ());
+    // Only a session that actually opened the renderer's speaking state may
+    // close it. Several sessions can be queued behind speak_lock at once; a
+    // cancelled one emitting speaking-done would settle the pill out from under
+    // whichever session is genuinely speaking. Turn owners compensate via
+    // SessionOutcome.started — see start_session_full.
+    if started {
+        let _ = app.emit("speaking-done", ());
+    }
+    let _ = done_tx.send(SessionOutcome { started, completed: !cancelled(&state), spoken });
 }
 
 /// Speak a complete text (split into sentences, queued, non-blocking). The

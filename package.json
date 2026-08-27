@@ -1,11 +1,12 @@
 {
   "name": "vox",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Voice AI orchestration bar",
   "scripts": {
-    "dev": "tauri dev",
+    "dev": "tauri dev --no-watch",
     "build": "tauri build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "dev:watch": "tauri dev"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

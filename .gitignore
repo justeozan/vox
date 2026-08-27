@@ -3,3 +3,4 @@ node_modules/
 test
 src-tauri/target/
 scripts/icon-src.png
+__pycache__/
