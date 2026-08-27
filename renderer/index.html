@@ -38,10 +38,10 @@
     /* Translucent enough that the native blur reads through — with the
        vibrancy view now correctly BELOW the webview, the pill stays dark
        and premium without killing the real-time blur. */
-    background: rgba(10, 10, 15, 0.62);
-    border: 1px solid rgba(255, 255, 255, 0.13);
+    background: rgba(3, 3, 6, 0.46);
+    border: 1px solid rgba(255, 255, 255, 0.09);
     border-radius: 28px;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
     overflow: hidden;
     transition: border-color 0.35s ease, box-shadow 0.35s ease;
   }
@@ -50,6 +50,9 @@
      box-shadow would bleed past the pill and get clipped to the window's
      rectangle — the "square corners" behind the violet/blue layers. */
   body.boot      .shell { border-color: rgba(196,181,253,0.6); box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 26px rgba(196,181,253,0.42); }
+  /* Unprompted speech. Violet like the agent family, but no pulse and a much
+     softer glow than boot — it announces, it doesn't demand. */
+  body.announcing .shell { border-color: rgba(167,139,250,0.38); box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 16px rgba(167,139,250,0.20); }
   body.active    .shell { border-color: rgba(74,222,128,0.32); }
   body.listening .shell { border-color: rgba(74,222,128,0.6);  animation: shellPulseGreen 2.2s ease-in-out infinite; }
   body.thinking  .shell { border-color: rgba(245,158,11,0.5); }
@@ -64,6 +67,30 @@
     0%, 100% { box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 14px rgba(96,165,250,0.12); }
     50%      { box-shadow: inset 0 1px 0 rgba(96,165,250,0.30), inset 0 0 28px rgba(96,165,250,0.30); }
   }
+
+  /* ── Entrance ───────────────────────────────────────────────────────────
+     Only at first show, where WE control the timing (Rust holds the window
+     hidden for 400ms, so this really does start from nothing). */
+  body.appearing .shell { animation: pillIn 0.42s var(--spring) both; }
+  @keyframes pillIn {
+    from { opacity: 0; transform: translateY(10px) scale(0.965); }
+    60%  { opacity: 1; }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  /* ── Return ─────────────────────────────────────────────────────────────
+     For coming back into view after a Space switch. Deliberately NOT an
+     entrance: we only learn about it after the compositor has already drawn
+     the pill, so anything starting from opacity 0 flashes — it appears, blinks
+     out, then fades back in. This starts from the visible state instead and
+     just draws the eye: a glint crosses, and the rim lights briefly. */
+  body.returning .shell { animation: pillReturn 0.55s var(--smooth); }
+  @keyframes pillReturn {
+    0%   { border-color: rgba(255,255,255,0.09); }
+    35%  { border-color: rgba(255,255,255,0.30); box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), inset 0 0 22px rgba(255,255,255,0.10); }
+    100% { border-color: rgba(255,255,255,0.09); }
+  }
+  body.returning .boot-sweep { animation: bootSweep 0.55s var(--smooth) 1; }
 
   /* ── Boot sweep — violet sheen crossing once when the recap begins */
   .boot-sweep {
@@ -81,6 +108,7 @@
     transform: translateX(-110%);
   }
   body.boot .boot-sweep { animation: bootSweep 1.1s var(--smooth) 2; }
+  body.announcing .boot-sweep { animation: bootSweep 0.9s var(--smooth) 1; }
   @keyframes bootSweep {
     0%   { opacity: 0; transform: translateX(-110%); }
     25%  { opacity: 1; }
@@ -110,9 +138,9 @@
     align-items: center;
     gap: 10px;
     padding: 9px 13px;
-    border: 1px solid rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.05);
     border-radius: 13px;
-    background: rgba(255,255,255,0.03);
+    background: rgba(0,0,0,0.22);
     opacity: 0.5;
     transform: scale(0.98);
     transition: opacity 0.35s ease, transform 0.35s var(--spring),
@@ -191,6 +219,24 @@
     background: rgba(255,255,255,0.07);
     border: 1px solid rgba(255,255,255,0.09);
     margin: 0 1px;
+  }
+
+  .segment button { white-space: nowrap; }
+
+  /* Provider + model share a row: the model list only means anything relative
+     to the provider, so they read as one control. min-width:0 lets both shrink
+     instead of overflowing the 500px panel. */
+  .setting-pair {
+    display: flex;
+    gap: 7px;
+    flex: 1;
+    min-width: 0;
+    justify-content: flex-end;
+  }
+  .setting-pair .setting-select {
+    min-width: 0;
+    flex: 1 1 0;
+    max-width: 190px;
   }
 
   .setting-row {
@@ -314,6 +360,7 @@
   body.speaking .dot  { background: var(--blue);   box-shadow: 0 0 9px rgba(96,165,250,0.6); }
   body.running .dot   { background: var(--violet); box-shadow: 0 0 9px rgba(167,139,250,0.6); }
   body.boot .dot      { background: var(--boot);   box-shadow: 0 0 16px rgba(196,181,253,0.95); animation: bootDot 1s var(--spring); }
+  body.announcing .dot { background: var(--violet); box-shadow: 0 0 12px rgba(167,139,250,0.75); animation: bootDot 0.7s var(--spring); }
 
   body.listening .ring.r1 { animation: ripple 1.6s ease-out infinite; }
   body.listening .ring.r2 { animation: ripple 1.6s ease-out 0.55s infinite; }
@@ -357,17 +404,21 @@
   body.speaking .waveform span  { background: rgba(96,165,250,0.7); }
   body.running .waveform span   { background: rgba(167,139,250,0.4); }
   body.boot .waveform span      { background: rgba(196,181,253,0.9); }
+  body.announcing .waveform span { background: rgba(167,139,250,0.75); }
   body.has-transcript .waveform { opacity: 0.25; }
 
   /* ── Transcript overlay — per-letter reveal ────────────────────────────── */
   .transcript {
     position: absolute;
-    left: 41px;
+    left: 38px;
     right: 150px;
     top: 50%;
     transform: translateY(-50%);
     pointer-events: none;
     font-size: 12.5px;
+    /* Fixed, so enlarging the spoken word can't grow the line box and shift
+       the whole transcript vertically. */
+    line-height: 20px;
     font-weight: 500;
     color: rgba(255,255,255,0.95);
     white-space: nowrap;
@@ -378,15 +429,13 @@
     z-index: 2;
   }
   .transcript.visible { opacity: 1; }
-  /* Inner scroller: holds the letters + caret and pans left when the line is
-     wider than the pill, so long text reads through instead of clipping. */
-  .transcript .transcript-inner {
+  /* The text rides on its own track so a line longer than the pill can slide
+     right-to-left and be read through, instead of being clipped mid-word. */
+  .transcript .track {
     display: inline-block;
     white-space: nowrap;
     will-change: transform;
   }
-  /* Delegation echo (what Vox actually prompted a worktree) — violet accent. */
-  .transcript.deleg { color: #d6c9ff; }
   .transcript .ch {
     display: inline-block;
     opacity: 0;
@@ -394,6 +443,34 @@
     animation: chIn 0.3s var(--smooth) forwards;
   }
   .transcript .ch.sp { width: 0.28em; }
+  /* Delegation echo — the exact prompt Vox sent an agent. Violet, because it is
+     Vox reporting an action rather than speaking to you. */
+  .transcript.deleg { color: #d6c9ff; }
+  /* Karaoke: the word being said is white and enlarged, everything else is
+     grey at normal size. `scale` is a transform, not a font-size change, so
+     the surrounding words never reflow — the line keeps its measured width and
+     the follow-the-voice scroll stays exact. */
+  .transcript .w {
+    display: inline-block;
+    transform-origin: 50% 50%;
+    transition: color 0.12s ease, transform 0.14s var(--smooth),
+                margin 0.14s var(--smooth);
+  }
+  /* Only dim once a word-by-word pass is actually running: without audio to
+     follow (your own transcript) the line stays fully legible. */
+  .transcript.karaoke .w { color: rgba(255,255,255,0.42); }
+  /* Zoom with `transform`, make room with a per-word margin computed in JS.
+     Neither alone works: `font-size` reserves the right space but reflows the
+     line VERTICALLY (the whole transcript bobs as the highlight moves), while
+     `scale()` leaves the vertical alone but reserves nothing — and its overlap
+     is proportional to word length, so no fixed em margin can serve both a
+     3-letter and a 10-letter word. So: transform for the look (zero vertical
+     effect), and a margin measured from each word's own width for the room.
+     See KARAOKE_ZOOM in the script. */
+  .transcript.karaoke .w.spoken {
+    color: #fff;
+    text-shadow: 0 1px 8px rgba(0,0,0,0.5);
+  }
   @keyframes chIn { to { opacity: 1; transform: translateY(0) scale(1); } }
   .transcript .caret {
     display: inline-block;
@@ -423,6 +500,7 @@
   body.speaking .label  { color: rgba(96,165,250,0.8); }
   body.running .label   { color: rgba(167,139,250,0.9); }
   body.boot .label      { color: rgba(196,181,253,0.95); }
+  body.announcing .label { color: rgba(167,139,250,0.95); }
   @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
   /* ── Agent badge ───────────────────────────────────────────────────────── */
@@ -442,6 +520,16 @@
   @keyframes badgePop {
     from { transform: scale(0.5); opacity: 0; }
     to   { transform: scale(1); opacity: 1; }
+  }
+  /* Outline-only: quieter than the filled agent badge sitting next to it. */
+  .badge.announce {
+    background: transparent;
+    border-color: rgba(167,139,250,0.55);
+    color: #c9b8fd;
+    min-width: 22px;
+    text-align: center;
+    padding: 2px 7px;
+    cursor: pointer;
   }
 
   /* ── Gear — revealed on hover with a spin-in ───────────────────────────── */
@@ -532,6 +620,7 @@
     overflow: hidden;
     white-space: nowrap;
   }
+  .setup-chip.opt.miss .sdot { background: #5a5a64; box-shadow: none; }
   .setup-chip .sdot {
     width: 6px; height: 6px; border-radius: 50%;
     background: #5a5a64; flex-shrink: 0;
@@ -587,8 +676,11 @@
       <div class="settings-hint"><kbd>⌘</kbd><kbd>,</kbd></div>
     </div>
     <div class="setting-row">
-      <div class="setting-label" id="lbl-model">Modèle</div>
-      <select id="model-select" class="setting-select"></select>
+      <div class="setting-label" id="lbl-provider">IA</div>
+      <div class="setting-pair">
+        <select id="provider-select" class="setting-select"></select>
+        <select id="model-select" class="setting-select"></select>
+      </div>
     </div>
     <div class="setting-row">
       <div class="setting-label" id="lbl-lang">Langue</div>
@@ -596,6 +688,17 @@
         <button data-lang="fr">FR</button>
         <button data-lang="en">EN</button>
       </div>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label" id="lbl-agent-reply">Réponse d'agent</div>
+      <div class="segment" id="agent-reply-segment">
+        <button data-reply="summary">RÉSUMÉ</button>
+        <button data-reply="verbatim">MOT POUR MOT</button>
+      </div>
+    </div>
+    <div class="setting-row" id="row-tts-engine" style="display:none">
+      <div class="setting-label" id="lbl-tts-engine">Voix</div>
+      <select id="tts-engine-select" class="setting-select"></select>
     </div>
     <div class="setting-row">
       <div class="setting-label" id="lbl-version">Version</div>
@@ -619,6 +722,7 @@
     <div class="setup-grid" id="setup-grid"></div>
     <div class="setup-log" id="setup-log"></div>
     <div class="setup-actions">
+      <button class="update-btn" id="qwen-btn">Qwen3-TTS (test)</button>
       <button class="update-btn" id="setup-btn">Installer</button>
     </div>
   </div>
@@ -632,6 +736,7 @@
     <div class="waveform" id="waveform" data-tauri-drag-region></div>
     <div class="transcript" id="transcript"></div>
     <div class="label" id="label" data-tauri-drag-region>⌥ space</div>
+    <div class="badge announce" id="announce-badge" title="">0</div>
     <div class="badge" id="badge">0 agents</div>
     <button class="gear" id="recap-btn" aria-label="recap">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -667,14 +772,21 @@ const SPEECH_SNR         = 2.2
 
 // ── Window geometry (must mirror the Rust animate_frame anchoring) ──────────
 // Hover growth is HORIZONTAL ONLY — height never changes on hover.
-const SIZE_BASE     = [480, 56]
-const SIZE_HOVER    = [548, 56]  // room for BOTH hover buttons (recap + gear)
-const SIZE_SETTINGS = [500, 396]
+// One width, always. The hover stretch was the most-noticed motion in the UI
+// for the least information: nothing about the pill's meaning changes when the
+// cursor arrives. The gear buttons now reveal inside this width.
+const SIZE_BASE     = [408, 56]
+const SIZE_SETTINGS = [500, 437]  // 6 rows × ~41px + header/padding
+const SETTINGS_ROW_H = 41         // 10px padding ×2 + 40px min-height + 1px border
 const SIZE_SETUP    = [520, 470]
 
 // ── State machine ─────────────────────────────────────────────────────────────
 let state = 'idle'
 let agentCount = 0
+let agentLabels = []
+let pendingAnnouncements = 0
+let appearing = false
+let returning = false
 let settingsOpen = false
 let carouselOpen = false
 let carouselCloseTimer = null
@@ -688,9 +800,15 @@ const LABEL_TABLE = {
   fr: {
     idle: '⌥ space', active: 'à l\'écoute', listening: 'je t\'entends…',
     thinking: 'réflexion…', speaking: 'réponse…', running: 'agents actifs',
-    boot: 'récap en cours…',
+    boot: 'récap en cours…', announcing: 'annonce…',
     settingsTitle: 'paramètres', model: 'Modèle', lang: 'Langue',
-    version: 'Version', update: 'Mises à jour',
+    version: 'Version', update: 'Mises à jour', provider: 'IA',
+    provOllama: 'Local (Ollama)', provClaudeCli: 'Claude (abonnement)',
+    provCodexCli: 'Codex (abonnement)', provAnthropic: 'Claude (clé API)',
+    provOpenai: 'OpenAI (clé API)',
+    agentReply: 'Réponse d\'agent', replySummary: 'RÉSUMÉ', replyVerbatim: 'MOT POUR MOT',
+    ttsEngine: 'Voix', engAuto: 'Automatique', engKokoro: 'Kokoro', engPiper: 'Piper',
+    engQwen: 'Qwen3 (test)', engSay: 'macOS (say)',
     check: 'Vérifier', checking: '…', upToDate: 'À jour', download: 'Télécharger',
     setupTitle: 'installation', setupInstall: 'Installer', setupDone: 'Terminé',
     setupRetry: 'Réessayer', setupStatusBusy: 'installation en cours…',
@@ -699,9 +817,15 @@ const LABEL_TABLE = {
   en: {
     idle: '⌥ space', active: 'listening', listening: 'I hear you…',
     thinking: 'thinking…', speaking: 'replying…', running: 'agents active',
-    boot: 'briefing…',
+    boot: 'briefing…', announcing: 'heads up…',
     settingsTitle: 'settings', model: 'Model', lang: 'Language',
-    version: 'Version', update: 'Updates',
+    version: 'Version', update: 'Updates', provider: 'AI',
+    provOllama: 'Local (Ollama)', provClaudeCli: 'Claude (subscription)',
+    provCodexCli: 'Codex (subscription)', provAnthropic: 'Claude (API key)',
+    provOpenai: 'OpenAI (API key)',
+    agentReply: 'Agent reply', replySummary: 'SUMMARY', replyVerbatim: 'VERBATIM',
+    ttsEngine: 'Voice', engAuto: 'Automatic', engKokoro: 'Kokoro', engPiper: 'Piper',
+    engQwen: 'Qwen3 (test)', engSay: 'macOS (say)',
     check: 'Check', checking: '…', upToDate: 'Up to date', download: 'Download',
     setupTitle: 'setup', setupInstall: 'Install', setupDone: 'Done',
     setupRetry: 'Retry', setupStatusBusy: 'installing…',
@@ -712,10 +836,10 @@ const LABEL_TABLE = {
 const COMP_LABELS = {
   fr: { python: 'Python', ffmpeg: 'ffmpeg', espeakNg: 'espeak-ng', ollama: 'Ollama',
         venv: 'venv', whisper: 'Whisper', kokoro: 'Kokoro', piper: 'Piper',
-        piperVoice: 'Voix Piper' },
+        piperVoice: 'Voix Piper', qwen3: 'Qwen3-TTS', qwen3Model: 'Modèle Qwen3' },
   en: { python: 'Python', ffmpeg: 'ffmpeg', espeakNg: 'espeak-ng', ollama: 'Ollama',
         venv: 'venv', whisper: 'Whisper', kokoro: 'Kokoro', piper: 'Piper',
-        piperVoice: 'Piper voice' },
+        piperVoice: 'Piper voice', qwen3: 'Qwen3-TTS', qwen3Model: 'Qwen3 model' },
 }
 
 const labelEl = document.getElementById('label')
@@ -744,10 +868,22 @@ function bodyClasses() {
     + (carouselOpen ? ' carousel-open' : '')
     + (hovered ? ' hovered' : '')
     + (transcriptEl.classList.contains('visible') ? ' has-transcript' : '')
+    + (appearing ? ' appearing' : '')
+    + (returning ? ' returning' : '')
+}
+
+// Mirrored to the backend on every transition. The mic lives entirely in the
+// webview, so this is Rust's ONLY view of whether Vox may speak unprompted.
+// Keep in sync with the UI_* constants in lib.rs.
+const UI_CODES = {
+  idle: 0, active: 1, listening: 2, thinking: 3,
+  speaking: 4, running: 5, boot: 6, announcing: 7,
 }
 
 function setState(s) {
+  if (s !== state) lastSpeechSignal = Date.now()
   state = s
+  invoke('ui_state', { code: UI_CODES[s] ?? 0 }).catch(() => {})
   bodyClasses()
   const labels = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
   setLabel(labels[s] || '')
@@ -757,8 +893,29 @@ function setState(s) {
 
 function updateBadge() {
   const badge = document.getElementById('badge')
-  badge.textContent = agentCount + (agentCount === 1 ? ' agent' : ' agents')
+  // Naming the single agent is the high-value case: you launched it three
+  // seconds ago and want to confirm it went to the right repo. With two or
+  // more the labels won't fit a 480px pill, so fall back to the count.
+  // Repo name only: "orivo (porto)" is wider than the gutter the transcript
+  // reserves on the right, and the two collided mid-sentence. The worktree
+  // codename is still in the tooltip.
+  const short = (agentLabels[0] || '').split(' (')[0]
+  badge.textContent = (agentCount === 1 && short)
+    ? '1 · ' + short
+    : agentCount + (agentCount === 1 ? ' agent' : ' agents')
+  badge.title = agentLabels.join(', ')
   badge.style.display = (agentCount > 0 && state !== 'idle') ? 'block' : 'none'
+  updateAnnounceBadge()
+}
+
+function updateAnnounceBadge() {
+  const b = document.getElementById('announce-badge')
+  b.textContent = pendingAnnouncements
+  b.title = pendingAnnouncements
+    ? (uiLang === 'en' ? 'Click to hear what\'s waiting' : 'Clique pour entendre ce qui attend')
+    : ''
+  // Hidden while actually announcing — the pill itself is the signal then.
+  b.style.display = (pendingAnnouncements > 0 && state !== 'announcing') ? 'block' : 'none'
 }
 
 // ── Waveform ──────────────────────────────────────────────────────────────────
@@ -789,6 +946,11 @@ function animateWaveform(s) {
         h = 5 + Math.abs(Math.sin(t / 92 + i * 0.9)) * 19
       } else if (s === 'running') {
         h = i % 4 === 0 ? 4 + Math.abs(Math.sin(t / 550 + i)) * 9 : 4
+      } else if (s === 'announcing') {
+        // Travelling wave, L→R: something arrived from outside, as opposed to
+        // boot's centre-out "waking up" or speaking's conversational bounce.
+        const phase = (t / 150 - i * 0.55) % 7
+        h = 5 + Math.max(0, 17 - Math.abs(phase - 1.5) * 9)
       } else if (s === 'boot') {
         // Center-out ripple — the "AI arriving" wave
         const center = (BAR_COUNT - 1) / 2
@@ -806,70 +968,148 @@ function animateWaveform(s) {
 // ── Transcript reveal ─────────────────────────────────────────────────────────
 const transcriptEl = document.getElementById('transcript')
 let transcriptHideTimer = null
-let transcriptScrollAnim = null
+let transcriptScrollTimer = null
 
-// Show a line with a per-letter reveal (the "highlight"). If it's wider than
-// the pill, pan it left-to-right after the reveal so the whole thing reads
-// through instead of being clipped with an ellipsis. `deleg` gives the violet
-// "here's what I prompted the agent" styling.
 function showTranscript(text, holdMs = 8000, { deleg = false } = {}) {
   clearTimeout(transcriptHideTimer)
   transcriptHideTimer = null
-  if (transcriptScrollAnim) { transcriptScrollAnim.cancel(); transcriptScrollAnim = null }
-  transcriptEl.innerHTML = ''
+  stopKaraoke()
   transcriptEl.classList.toggle('deleg', deleg)
+  transcriptEl.innerHTML = ''
 
-  // Generous cap (long advice/prompts now scroll rather than clip); the ellipsis
-  // only guards against pathological lengths.
-  const MAX = 320
-  const clipped = text.length > MAX ? text.slice(0, MAX - 1).trimEnd() + '…' : text
+  // Words wrap the per-letter spans so a word can be highlighted as a unit
+  // while the reveal still animates character by character.
+  const track = document.createElement('span')
+  track.className = 'track'
+  const words = []
+  let charIndex = 0
+  const perChar = Math.max(13, Math.min(34, 900 / Math.max(text.length, 1)))
 
-  const inner = document.createElement('span')
-  inner.className = 'transcript-inner'
-  const chars = [...clipped]
-  const perChar = Math.max(9, Math.min(34, 900 / Math.max(chars.length, 1)))
-  chars.forEach((ch, i) => {
-    const span = document.createElement('span')
-    span.className = 'ch' + (ch === ' ' ? ' sp' : '')
-    span.textContent = ch === ' ' ? ' ' : ch
-    span.style.animationDelay = (i * perChar) + 'ms'
-    inner.appendChild(span)
-  })
+  // Split keeping the separators, so spacing survives the round trip.
+  for (const piece of text.split(/(\s+)/)) {
+    if (!piece) continue
+    const isSpace = /^\s+$/.test(piece)
+    const wordEl = document.createElement('span')
+    wordEl.className = isSpace ? 'w sp-w' : 'w'
+    for (const ch of piece) {
+      const span = document.createElement('span')
+      span.className = 'ch' + (ch === ' ' ? ' sp' : '')
+      span.textContent = ch === ' ' ? ' ' : ch
+      span.style.animationDelay = (charIndex * perChar) + 'ms'
+      wordEl.appendChild(span)
+      charIndex++
+    }
+    if (!isSpace) {
+      words.push({ el: wordEl, start: charIndex - piece.length, end: charIndex })
+    }
+    track.appendChild(wordEl)
+  }
+
   const caret = document.createElement('span')
   caret.className = 'caret'
-  inner.appendChild(caret)
-
-  transcriptEl.appendChild(inner)
+  track.appendChild(caret)
+  transcriptEl.appendChild(track)
   transcriptEl.classList.add('visible')
   bodyClasses()
 
-  // After the reveal, if it overflows, pan the inner span left so the tail
-  // scrolls into view (left→right reading), keeping the letter highlight. The
-  // auto-hide is set here (not synchronously) so it can be stretched to let the
-  // scroll finish — otherwise a long line is clipped mid-pan, defeating it.
-  const revealMs = chars.length * perChar
-  const armHide = (ms) => { if (ms > 0) transcriptHideTimer = setTimeout(hideTranscript, ms) }
-  requestAnimationFrame(() => {
-    const overflow = inner.scrollWidth - transcriptEl.clientWidth
-    if (overflow > 6) {
-      const delay = revealMs + 650
-      const panMs = Math.min(11000, Math.max(2600, overflow * 20))
-      transcriptScrollAnim = inner.animate(
-        [{ transform: 'translateX(0)' }, { transform: `translateX(${-overflow}px)` }],
-        { duration: panMs, delay, easing: 'cubic-bezier(0.33,0,0.2,1)', fill: 'forwards' }
-      )
-      // Keep it up long enough to read the tail (+ a beat), never shorter than
-      // the caller asked for.
-      armHide(holdMs > 0 ? Math.max(holdMs, delay + panMs + 900) : 0)
-    } else {
-      armHide(holdMs)
+  // One forced layout per sentence: measure every word at rest, then never
+  // read layout again while the highlight moves.
+  for (const w of words) w.pad = Math.round(w.el.offsetWidth * (KARAOKE_ZOOM - 1) / 2)
+
+  karaoke = { track, words, total: charIndex, overflow: 0, active: -1 }
+  karaoke.overflow = Math.max(0, track.scrollWidth - transcriptEl.clientWidth)
+
+  // Fallback when there's no audio to follow (the user's own transcript, or a
+  // `say` fallback): time-based scroll so a long line still reads through.
+  clearTimeout(transcriptScrollTimer)
+  const revealMs = charIndex * perChar + 300
+  let scrollMs = 0
+  if (karaoke.overflow > 4) {
+    scrollMs = Math.round((karaoke.overflow / 70) * 1000) + 1500
+    transcriptScrollTimer = setTimeout(() => {
+      // Karaoke took over in the meantime — leave it alone.
+      if (karaoke && karaoke.driven) return
+      track.style.transition = 'transform ' + (scrollMs - 1500) + 'ms linear'
+      track.style.transform = 'translateX(-' + karaoke.overflow + 'px)'
+    }, revealMs + 600)
+  }
+
+  // holdMs = 0 → no auto-hide (live speech: the next sentence or the
+  // speaking-done handler decides). Otherwise never hide mid-scroll.
+  if (holdMs > 0) {
+    transcriptHideTimer = setTimeout(hideTranscript, Math.max(holdMs, revealMs + scrollMs))
+  }
+}
+
+// ── Karaoke ───────────────────────────────────────────────────────────────────
+// Highlight follows the AUDIO, not a guessed reading speed: progress through
+// the WAV maps to progress through the sentence. It's linear rather than
+// phoneme-aligned — the daemons return a WAV, not word timings — but over one
+// short sentence at a steady speaking rate it tracks closely, and it can never
+// drift out of sync with the voice the way a fixed px/s scroll does.
+const KARAOKE_ZOOM = 1.2
+let karaoke = null
+let karaokeRaf = 0
+
+function stopKaraoke() {
+  if (karaokeRaf) cancelAnimationFrame(karaokeRaf)
+  karaokeRaf = 0
+  karaoke = null
+  transcriptEl.classList.remove('karaoke')
+}
+
+function driveKaraoke(audio) {
+  if (!karaoke || !karaoke.words.length) return
+  karaoke.driven = true
+  transcriptEl.classList.add('karaoke')
+  // Drop the timed scroll: the audio drives position from here on.
+  karaoke.track.style.transition = 'transform 0.18s linear'
+
+  const step = () => {
+    if (!karaoke || !audio || audio.paused || audio.ended) {
+      karaokeRaf = 0
+      return
     }
-  })
+    const dur = audio.duration
+    if (dur && isFinite(dur) && dur > 0) {
+      const p = Math.min(1, audio.currentTime / dur)
+      const at = p * karaoke.total
+      let idx = karaoke.words.findIndex((w) => at < w.end)
+      if (idx < 0) idx = karaoke.words.length - 1
+
+      if (idx !== karaoke.active) {
+        const prev = karaoke.active
+        karaoke.active = idx
+        // Only touch the two words that changed — repainting all of them every
+        // step is what makes a karaoke line shimmer.
+        for (const i of [prev, idx]) {
+          const w = karaoke.words[i]
+          if (!w) continue
+          const on = i === idx
+          w.el.classList.toggle('spoken', on)
+          w.el.style.transform = on ? 'scale(' + KARAOKE_ZOOM + ')' : ''
+          // Exactly the width the zoom will claim on each side — measured from
+          // this word, so a long word gets more room than a short one.
+          w.el.style.margin = on ? '0 ' + w.pad + 'px' : ''
+        }
+        // Keep the spoken word in view, a third in from the left so the next
+        // few words are already readable.
+        if (karaoke.overflow > 4) {
+          const target = karaoke.words[idx].el.offsetLeft - transcriptEl.clientWidth * 0.33
+          const x = Math.max(0, Math.min(karaoke.overflow, target))
+          karaoke.track.style.transform = 'translateX(-' + x + 'px)'
+        }
+      }
+    }
+    karaokeRaf = requestAnimationFrame(step)
+  }
+  if (!karaokeRaf) karaokeRaf = requestAnimationFrame(step)
 }
 
 function hideTranscript() {
   transcriptEl.classList.remove('visible')
-  if (transcriptScrollAnim) { transcriptScrollAnim.cancel(); transcriptScrollAnim = null }
+  stopKaraoke()
+  clearTimeout(transcriptScrollTimer)
   clearTimeout(transcriptHideTimer)
   transcriptHideTimer = null
   voxIsShowing = false
@@ -908,7 +1148,7 @@ async function activateVox() {
     setState('active')
     vadTick()
   } catch (err) {
-    console.error('[vox] activateVox failed:', err.name, err.message)
+    console.error('[vox] activateVox failed:', err.message)
   }
 }
 
@@ -942,7 +1182,13 @@ function vadTick() {
   const rms = getRMS()
 
   if (currentAudio) {
-    if (rms > BARGE_IN_THRESHOLD && ttsStartedAt && Date.now() - ttsStartedAt > 1200) {
+    // Barge-in only while Vox is answering YOU. During an unprompted
+    // announcement you never opened the mic, so a level above the threshold is
+    // Vox hearing itself through the speakers — and the durable queue then
+    // faithfully re-speaks what it thinks you cut off. That is where the
+    // intermittent duplicate announcements came from. ⌥Space still stops one.
+    if (state !== 'announcing'
+        && rms > BARGE_IN_THRESHOLD && ttsStartedAt && Date.now() - ttsStartedAt > 1200) {
       currentAudio.pause()
       currentAudio = null
       isRecording = false
@@ -1044,10 +1290,13 @@ function interruptSpeech() {
 async function toggleVox() {
   // During first-run setup the pill only shows install progress.
   if (setupOpen) return
-  // ⌥Space stops the startup recap (boot) or a reply being spoken (speaking).
-  // 'thinking' stays a no-op: interrupting an in-flight LLM call and letting a
-  // new turn start would race the abandoned reply onto the voice.
-  if (state === 'boot' || state === 'speaking') {
+  // ⌥Space stops the startup recap (boot), a reply being spoken (speaking), or
+  // an unprompted announcement. 'thinking' stays a no-op: interrupting an
+  // in-flight LLM call and letting a new turn start would race the abandoned
+  // reply onto the voice.
+  // An interrupted announcement is NOT lost — the backend queue is durable and
+  // puts it back at the front, so it returns once you're quiet again.
+  if (state === 'boot' || state === 'speaking' || state === 'announcing') {
     interruptSpeech()
     return
   }
@@ -1064,13 +1313,13 @@ function syncWindow() {
   if (setupOpen) {
     ;[w, h] = SIZE_SETUP
   } else if (settingsOpen) {
-    ;[w, h] = SIZE_SETTINGS
+    ;[w, h] = [SIZE_SETTINGS[0], SIZE_SETTINGS[1] + (engineRowVisible ? SETTINGS_ROW_H : 0)]
   } else if (carouselOpen) {
     const cards = carouselEl.children.length
     w = 500
     h = 56 + 22 + Math.min(Math.max(cards, 1), 4) * 45
   } else {
-    ;[w, h] = hovered ? SIZE_HOVER : SIZE_BASE
+    ;[w, h] = SIZE_BASE
   }
   invoke('resize_window', { width: w, height: h })
 }
@@ -1109,6 +1358,16 @@ function openCarousel() {
   syncWindow()
 }
 
+// Click the pill to show or dismiss the worktree list.
+function toggleCarousel() {
+  if (settingsOpen || setupOpen) return
+  if (carouselOpen) {
+    closeCarousel(0)
+  } else if (carouselEl.children.length > 0) {
+    openCarousel()
+  }
+}
+
 function closeCarousel(delay = 0) {
   clearTimeout(carouselCloseTimer)
   carouselCloseTimer = setTimeout(() => {
@@ -1132,14 +1391,60 @@ function highlightWorkspace(name) {
 let hoverOutTimer = null
 let userDragging = false
 
-// While the user drags the pill (mousedown on a drag region), suppress
-// hover-resize — otherwise a mouseleave mid-drag teleports the window.
-document.addEventListener('mousedown', (e) => {
-  if (e.button === 0 && e.target?.hasAttribute?.('data-tauri-drag-region')) {
-    userDragging = true
-  }
+// ── Dragging the pill ─────────────────────────────────────────────────────────
+// Done here rather than by AppKit: the window is a non-activating NSPanel (so it
+// can appear over other apps' fullscreen Spaces), and such a panel never becomes
+// key on click, so AppKit's movableByWindowBackground drag loop never starts.
+//
+// Pointer capture is what makes this reliable — events keep arriving even when
+// the cursor outruns the window, which a plain mousemove listener would lose.
+// Deltas are accumulated and flushed once per frame so a fast drag doesn't
+// queue hundreds of IPC calls.
+let dragState = null
+let dragRaf = 0
+
+function flushDrag() {
+  dragRaf = 0
+  if (!dragState || (!dragState.dx && !dragState.dy)) return
+  const { dx, dy } = dragState
+  dragState.dx = 0
+  dragState.dy = 0
+  invoke('move_pill', { dx, dy }).catch(() => {})
+}
+
+document.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return
+  // Never hijack a real control.
+  if (e.target?.closest?.('button, select, input, .ws-card, .setup-chip')) return
+  if (!e.target?.closest?.('[data-tauri-drag-region]')) return
+  dragState = { x: e.screenX, y: e.screenY, dx: 0, dy: 0, moved: 0, id: e.pointerId }
+  userDragging = true
+  try { e.target.setPointerCapture(e.pointerId) } catch {}
 })
-document.addEventListener('mouseup', () => { userDragging = false })
+
+document.addEventListener('pointermove', (e) => {
+  if (!dragState || e.pointerId !== dragState.id) return
+  dragState.moved += Math.abs(e.screenX - dragState.x) + Math.abs(e.screenY - dragState.y)
+  dragState.dx += e.screenX - dragState.x
+  dragState.dy += e.screenY - dragState.y
+  dragState.x = e.screenX
+  dragState.y = e.screenY
+  if (!dragRaf) dragRaf = requestAnimationFrame(flushDrag)
+})
+
+function endDrag(e) {
+  if (!dragState) return
+  flushDrag()
+  const moved = dragState.moved
+  try { e?.target?.releasePointerCapture?.(dragState.id) } catch {}
+  dragState = null
+  userDragging = false
+  // A press that didn't travel is a click, not a drag: that's the gesture for
+  // showing the worktree list.
+  if (moved < 4) toggleCarousel()
+}
+document.addEventListener('pointerup', endDrag)
+document.addEventListener('pointercancel', endDrag)
 
 document.body.addEventListener('mouseenter', () => {
   userDragging = false  // native drag swallows mouseup — reset here
@@ -1166,6 +1471,9 @@ const setupLog = document.getElementById('setup-log')
 const setupBtn = document.getElementById('setup-btn')
 const setupStatus = document.getElementById('setup-status')
 
+// Not required for Vox to run: absent renders neutral, never as a failure.
+const OPTIONAL_COMPONENTS = new Set(['qwen3', 'qwen3Model'])
+
 function renderSetup(probe) {
   const labels = COMP_LABELS[uiLang] || COMP_LABELS.fr
   setupGrid.innerHTML = ''
@@ -1175,6 +1483,7 @@ function renderSetup(probe) {
     if (!c) continue
     const chip = document.createElement('div')
     chip.className = 'setup-chip ' + (c.ok ? 'ok' : 'miss')
+      + (OPTIONAL_COMPONENTS.has(key) ? ' opt' : '')
     const dot = document.createElement('span'); dot.className = 'sdot'
     const name = document.createElement('span'); name.className = 'sname'
     name.textContent = labels[key]
@@ -1290,14 +1599,64 @@ document.getElementById('setup-repair-btn').addEventListener('click', async () =
 // ── Settings ──────────────────────────────────────────────────────────────────
 const modelSelect = document.getElementById('model-select')
 const langSegment = document.getElementById('lang-segment')
+const agentReplySegment = document.getElementById('agent-reply-segment')
+const providerSelect = document.getElementById('provider-select')
+const PROVIDERS = ['ollama', 'claude-cli', 'codex-cli', 'anthropic', 'openai']
+const PROVIDER_LABEL = {
+  'ollama': 'provOllama', 'claude-cli': 'provClaudeCli', 'codex-cli': 'provCodexCli',
+  'anthropic': 'provAnthropic', 'openai': 'provOpenai',
+}
+let providerStatus = {}
+
+function renderProviderOptions(current) {
+  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+  providerSelect.innerHTML = ''
+  for (const p of PROVIDERS) {
+    const st = providerStatus[p] || { ok: true, detail: '' }
+    const o = document.createElement('option')
+    o.value = p
+    // Say WHY it can't be used rather than hiding it — the fix (set a key,
+    // install a CLI) is one action the user can take.
+    o.textContent = L[PROVIDER_LABEL[p]] + (st.ok ? '' : ' — ' + st.detail)
+    o.disabled = !st.ok && p !== current
+    providerSelect.appendChild(o)
+  }
+  providerSelect.value = current || 'ollama'
+}
+
+const engineSelect = document.getElementById('tts-engine-select')
+const engineRow = document.getElementById('row-tts-engine')
+const ENGINE_KEYS = ['auto', 'kokoro', 'piper', 'qwen3', 'say']
+const ENGINE_LABEL = { auto: 'engAuto', kokoro: 'engKokoro', piper: 'engPiper',
+                       qwen3: 'engQwen', say: 'engSay' }
+let engineRowVisible = false
+
+function renderEngineOptions() {
+  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+  const cur = engineSelect.value
+  engineSelect.innerHTML = ''
+  for (const k of ENGINE_KEYS) {
+    const o = document.createElement('option')
+    o.value = k
+    o.textContent = L[ENGINE_LABEL[k]]
+    engineSelect.appendChild(o)
+  }
+  engineSelect.value = cur || 'auto'
+}
 
 function applyUiLang() {
   const labels = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
   document.getElementById('settings-title').textContent = labels.settingsTitle
-  document.getElementById('lbl-model').textContent = labels.model
   document.getElementById('lbl-lang').textContent = labels.lang
   document.getElementById('lbl-version').textContent = labels.version
   document.getElementById('lbl-update').textContent = labels.update
+  document.getElementById('lbl-agent-reply').textContent = labels.agentReply
+  document.getElementById('lbl-provider').textContent = labels.provider
+  document.getElementById('lbl-tts-engine').textContent = labels.ttsEngine
+  renderEngineOptions()
+  for (const b of agentReplySegment.querySelectorAll('button')) {
+    b.textContent = b.dataset.reply === 'summary' ? labels.replySummary : labels.replyVerbatim
+  }
   renderUpdateBtn()
   renderSetupI18n()
   lastLabel = ''
@@ -1358,21 +1717,29 @@ async function openSettings() {
     document.getElementById('app-version').textContent = 'v' + (await invoke('get_version'))
   } catch {}
 
-  const models = await invoke('list_models')
-  modelSelect.innerHTML = ''
-  const seen = new Set()
-  for (const name of [current.model, ...models]) {
-    if (!name || seen.has(name)) continue
-    seen.add(name)
-    const opt = document.createElement('option')
-    opt.value = name; opt.textContent = name
-    modelSelect.appendChild(opt)
-  }
-  modelSelect.value = current.model || ''
+  // Provider first: it decides which model list is even meaningful.
+  providerStatus = await invoke('provider_status').catch(() => ({}))
+  renderProviderOptions(current.provider || 'ollama')
+  await reloadModels(current.provider || 'ollama', current.model)
 
   for (const btn of langSegment.querySelectorAll('button')) {
     btn.classList.toggle('on', btn.dataset.lang === current.language)
   }
+  for (const btn of agentReplySegment.querySelectorAll('button')) {
+    btn.classList.toggle('on', btn.dataset.reply === (current.agent_reply || 'summary'))
+  }
+
+  // Only offer the picker once there is something to pick: until Qwen is
+  // installed the choice is between two engines the user can't hear apart
+  // (one per language), so the row would be noise.
+  const probe = lastProbe || await invoke('probe_setup').catch(() => null)
+  engineRowVisible = !!(probe && probe.qwenReady)
+  engineRow.style.display = engineRowVisible ? '' : 'none'
+  if (engineRowVisible) {
+    renderEngineOptions()
+    engineSelect.value = current.tts_engine || 'auto'
+  }
+  syncWindow()
 }
 
 function closeSettings() {
@@ -1385,6 +1752,26 @@ function closeSettings() {
 function toggleSettings() {
   if (settingsOpen) closeSettings(); else openSettings()
 }
+
+const qwenBtn = document.getElementById('qwen-btn')
+qwenBtn.addEventListener('click', async () => {
+  if (setupRunning) return
+  setupRunning = true
+  qwenBtn.disabled = true
+  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+  setSetupStatus('busy', L.setupStatusBusy)
+  try {
+    lastProbe = await invoke('install_engine', { name: 'qwen3' })
+    renderSetup(lastProbe)
+    setSetupStatus(lastProbe.qwenReady ? 'ok' : 'bad',
+                   lastProbe.qwenReady ? L.setupStatusOk : L.setupStatusFail)
+  } catch (err) {
+    appendLog('qwen', String((err && err.message) || err))
+    setSetupStatus('bad', L.setupStatusFail)
+  }
+  setupRunning = false
+  qwenBtn.disabled = false
+})
 
 document.getElementById('gear').addEventListener('click', toggleSettings)
 
@@ -1401,8 +1788,45 @@ document.getElementById('recap-btn').addEventListener('click', () => {
   }
 })
 
+providerSelect.addEventListener('change', async () => {
+  const next = await invoke('set_settings', { next: { provider: providerSelect.value } })
+  // The backend resets `model` to that provider's default, because model ids
+  // don't transfer — reload the list and show what it actually picked.
+  await reloadModels(next.provider, next.model)
+})
+
+async function reloadModels(provider, model) {
+  const models = await invoke('list_models', { provider }).catch(() => [])
+  modelSelect.innerHTML = ''
+  for (const name of models) {
+    const o = document.createElement('option')
+    o.value = name; o.textContent = name
+    modelSelect.appendChild(o)
+  }
+  if (model && !models.includes(model)) {
+    const o = document.createElement('option')
+    o.value = model; o.textContent = model
+    modelSelect.appendChild(o)
+  }
+  modelSelect.value = model || (models[0] || '')
+}
+
 modelSelect.addEventListener('change', () => {
   invoke('set_settings', { next: { model: modelSelect.value } })
+})
+
+// Restarts the TTS daemon and speaks a fixed sample line — the A/B in one click.
+engineSelect.addEventListener('change', () => {
+  invoke('set_settings', { next: { tts_engine: engineSelect.value } })
+})
+
+// No daemon restart here, unlike the language toggle: the announcement path
+// reads this per turn.
+agentReplySegment.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-reply]')
+  if (!btn) return
+  for (const b of agentReplySegment.querySelectorAll('button')) b.classList.toggle('on', b === btn)
+  invoke('set_settings', { next: { agent_reply: btn.dataset.reply } })
 })
 
 langSegment.addEventListener('click', (e) => {
@@ -1415,6 +1839,36 @@ langSegment.addEventListener('click', (e) => {
 })
 
 // ── Events from Rust ─────────────────────────────────────────────────────────
+// Restarting a CSS animation needs the class off, a forced reflow, then on —
+// otherwise re-adding it is a no-op and nothing plays.
+function replay(setFlag, ms) {
+  setFlag(false)
+  bodyClasses()
+  void document.body.offsetWidth
+  setFlag(true)
+  bodyClasses()
+  return setTimeout(() => { setFlag(false); bodyClasses() }, ms)
+}
+
+let appearTimer = null
+let returnTimer = null
+
+// First show only: Rust keeps the window hidden for 400ms, so this genuinely
+// starts from nothing and can afford to fade and rise.
+function playEntrance() {
+  clearTimeout(appearTimer)
+  appearTimer = replay((v) => { appearing = v }, 500)
+}
+
+// Back from another Space. We find out AFTER the compositor has drawn the pill,
+// so this must never start from invisible.
+function playReturn() {
+  clearTimeout(returnTimer)
+  returnTimer = replay((v) => { returning = v }, 620)
+}
+listen('pill-appear', playReturn)
+listen('pill-shown', playEntrance)
+
 listen('toggle-listening', toggleVox)
 listen('toggle-settings', toggleSettings)
 
@@ -1427,7 +1881,23 @@ listen('setup-log', (e) => {
   appendLog(e.payload.tag || 'setup', e.payload.line || '')
 })
 
+// Last-resort unbricking. The pill only leaves a speaking state on
+// speaking-done, so ANY backend path that fails to emit it would strand the UI
+// until restart. This makes that impossible regardless of backend bugs.
+let lastSpeechSignal = Date.now()
+const SPEECH_STALL_MS = 150000
+setInterval(() => {
+  const stuck = state === 'thinking' || state === 'boot'
+             || state === 'speaking' || state === 'announcing'
+  if (stuck && Date.now() - lastSpeechSignal > SPEECH_STALL_MS) {
+    console.warn('[vox] speech state stalled — force-settling')
+    currentAudio = null
+    setState(micStream ? 'active' : (agentCount > 0 ? 'running' : 'idle'))
+  }
+}, 5000)
+
 listen('speaking-start', () => {
+  lastSpeechSignal = Date.now()
   ttsStartedAt = Date.now()
   setState('speaking')
 })
@@ -1439,20 +1909,16 @@ listen('speaking-done', () => {
   // without ever emitting speaking-start, and 'thinking' has no other exit —
   // excluding it bricked the pill until restart. 'active'/'listening' stay
   // protected from late duplicate speaking-done events.
-  if (state === 'speaking' || state === 'boot' || state === 'thinking') {
+  if (state === 'speaking' || state === 'boot' || state === 'thinking' || state === 'announcing') {
     setState(micStream ? 'active' : (agentCount > 0 ? 'running' : 'idle'))
   }
   if (carouselOpen) closeCarousel(1400)
-  // Just delegated? Bring the exact prompt back up (scrolls if long) so you can
-  // read/verify what was sent — outlives the short spoken confirmation.
-  if (lastDelegation && Date.now() - lastDelegation.at < 20000) {
-    showTranscript(lastDelegation.text, 24000, { deleg: true })
-    lastDelegation = null
-  } else if (transcriptEl.classList.contains('visible')) {
+  if (transcriptEl.classList.contains('visible')) {
     clearTimeout(transcriptHideTimer)
-    // Vox's last sentence (usually the recommendation) stays readable for a
-    // while; the user's own words fade quickly as before.
-    transcriptHideTimer = setTimeout(hideTranscript, voxIsShowing ? 45000 : 1300)
+    // Clear out promptly once the voice stops. Leaving the last sentence up for
+    // 45s meant the pill spent most of its life displaying something already
+    // said — the bar should return to rest when Vox is done.
+    transcriptHideTimer = setTimeout(hideTranscript, voxIsShowing ? 2200 : 1300)
   }
 })
 
@@ -1462,6 +1928,7 @@ listen('speaking-done', () => {
 // both onerror AND play().catch; a duplicate ack must not consume the NEXT
 // sentence's wait on the Rust side).
 listen('play-wav', (e) => {
+  lastSpeechSignal = Date.now()
   const src = convertFileSrc(e.payload.path)
   const id = e.payload.id
   if (e.payload.workspace) {
@@ -1481,27 +1948,74 @@ listen('play-wav', (e) => {
   currentAudio = new Audio(src)
   currentAudio.onended = finish
   currentAudio.onerror = finish
-  currentAudio.play().catch(finish)
+  // Highlight + scroll follow this clip's playback position.
+  currentAudio.onplaying = () => driveKaraoke(currentAudio)
+  currentAudio.play().then(() => driveKaraoke(currentAudio)).catch(finish)
 })
 
 // Worktree cards for the recap carousel — arrives just before the brief.
 // Only auto-open from a resting/boot state; never yank the UI open while the
 // user is mid-recording or mid-reply (play-wav reopens it lazily anyway).
 listen('workspaces-data', (e) => {
+  // Build only. The watcher refreshes this every 30s, so auto-opening here kept
+  // the worktree list permanently on screen with no way to dismiss it. It opens
+  // for the startup recap (which is about those cards) and otherwise when you
+  // click the pill.
   buildCarousel(Array.isArray(e.payload) ? e.payload : [])
-  if (state === 'idle' || state === 'active' || state === 'running' || state === 'boot') {
-    openCarousel()
-  }
+  if (state === 'boot') openCarousel()
 })
 
 listen('agent-status', (e) => {
   agentCount = e.payload.count
+  agentLabels = (e.payload.agents || []).map((a) => a.label).filter(Boolean)
   if (state !== 'listening' && state !== 'thinking' && state !== 'speaking'
-      && state !== 'active' && state !== 'boot') {
+      && state !== 'active' && state !== 'boot' && state !== 'announcing') {
     setState(agentCount > 0 ? 'running' : 'idle')
   } else {
     updateBadge()
   }
+})
+
+// ── Proactive announcements ───────────────────────────────────────────────
+// Two invariants keep this from feeling like Clippy:
+//  1. it NEVER steals the turn — the backend only speaks from a resting state,
+//     and this guard mirrors that so a late event can't override a live turn;
+//  2. it is interruptible on the first syllable — ⌥Space (toggleVox) and the
+//     VAD barge-in path both already work, since currentAudio is set.
+listen('announce-start', () => {
+  // The count itself is owned by the backend (announce-pending) — it emits the
+  // post-pop value just before this fires, so don't decrement here too.
+  if (state === 'idle' || state === 'active' || state === 'running') {
+    setState('announcing')
+  } else {
+    updateAnnounceBadge()
+  }
+})
+
+listen('announce-pending', (e) => {
+  pendingAnnouncements = e.payload.count || 0
+  updateAnnounceBadge()
+})
+
+listen('announce-done', () => { updateAnnounceBadge() })
+
+document.getElementById('announce-badge').addEventListener('click', () => {
+  if (pendingAnnouncements === 0) return
+  if (state === 'idle' || state === 'active' || state === 'running') {
+    invoke('speak_pending_announcements')
+  }
+})
+
+// The exact prompt sent to an agent. Vox says one short sentence out loud, so
+// this is the only place the full drafted prompt is ever visible — and Conductor
+// cannot show it either, since a headless agent writes nothing to its database.
+listen('delegation', (e) => {
+  const p = e.payload || {}
+  const prompt = (p.prompt || '').trim()
+  if (!prompt) return
+  voxIsShowing = false
+  showTranscript('→ ' + (p.project || '?') + ' — ' + prompt, 14000, { deleg: true })
+  if (p.project) highlightWorkspace(p.project)
 })
 
 listen('transcript', (e) => {
@@ -1519,32 +2033,6 @@ listen('speaking-text', (e) => {
   if (!t) return
   voxIsShowing = true
   showTranscript(t, 0)
-})
-
-// What Vox actually dispatched to a worktree agent — shown verbatim (scrolls
-// if long) so you can verify the exact prompt that was sent. The agent's file
-// changes then show up in that worktree's diff inside Conductor.
-let lastDelegation = null
-listen('delegation', (e) => {
-  const p = e.payload || {}
-  const proj = p.project || '?'
-  const prompt = (p.prompt || '').trim()
-  if (!prompt) return
-  // Show it now for instant feedback; the spoken confirmation will briefly
-  // replace it, then speaking-done brings the full prompt back (scrolling).
-  lastDelegation = { text: '→ ' + proj + ' — ' + prompt, at: Date.now() }
-  voxIsShowing = false
-  showTranscript(lastDelegation.text, 0, { deleg: true })
-  highlightWorkspace(proj)
-})
-
-// Agent failed to even launch — surface it instead of failing silently, and
-// drop any pending delegation echo so speaking-done can't re-show it as success.
-listen('agent-error', (e) => {
-  const msg = (e.payload && e.payload.message) || 'agent launch failed'
-  lastDelegation = null
-  voxIsShowing = false
-  showTranscript('⚠ ' + msg, 7000)
 })
 
 listen('startup-brief-starting', () => {
