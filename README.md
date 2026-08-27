@@ -3,14 +3,28 @@
 A floating voice pill for macOS that lets you talk to your [Conductor](https://conductor.build) worktrees instead of alt-tabbing between them.
 
 <p align="center">
-  <img src="docs/vox-demo.gif" alt="Vox demo" width="600">
+  <img src="docs/vox-loop.gif" alt="Vox: launch an agent by voice, then hear its answer" width="720">
   <br>
-  <em>Demo — <a href="docs/vox-demo.mp4">watch the full mp4</a> for higher quality.</em>
+  <em>The loop, sped up: a spoken command launches an agent on <code>findy</code>, and Vox says so when it answers.</em>
+</p>
+<p align="center">
+  <img src="docs/vox-demo.gif" alt="Vox startup recap" width="600">
+  <br>
+  <em>The startup recap — <a href="docs/vox-demo.mp4">full mp4</a> for higher quality.</em>
 </p>
 
 ## What it does
 
-Vox sits at the bottom of your screen as a small always-on-top bar. Hit **Option+Space**, talk, and it answers out loud — using a local LLM that knows the state of every Conductor worktree you have running. On launch it reads Conductor's own database and speaks a recap: which agent is working, which is idle, which errored, and what it should look at first.
+Vox sits at the bottom of your screen as a small always-on-top bar. Hit **Option+Space** and talk.
+
+The loop it closes:
+
+> **Launch** — *"lance un agent sur findy pour corriger les tests"* — and it goes, on any repo Conductor knows about.
+> **Follow** — *"où en sont mes agents ?"* — answered from what is actually running, with elapsed time.
+> **Hear back** — when an agent answers, Vox tells you out loud, summarized or word for word.
+> **Ask** — *"il a dit quoi ?"* — the result stays answerable for half an hour.
+
+On launch it reads Conductor's own database and speaks a recap: which agent is working, which is idle, which errored, and what to look at first. Everything runs on your machine by default — no cloud calls, no API keys.
 
 Everything runs on your machine. No cloud calls, no API keys.
 
@@ -20,13 +34,14 @@ Everything runs on your machine. No cloud calls, no API keys.
 - **Startup recap with a live carousel.** On launch, once the local TTS model is warm, Vox speaks a one-sentence status for each in-progress worktree (agent still working / errored / waiting on you / done and ready to test) while the pill expands into a vertical carousel of worktree cards that scrolls to whichever one is being discussed. Quiet worktrees are grouped into a single line instead of repeated one by one, phrasing rotates between runs, and the recap closes with an LLM recommendation grounded in each worktree's *original ask* — including a proposed follow-up prompt when an agent's result looks done. Option+Space skips it, and a recap button (revealed on hover, next to the gear) replays it anytime.
 - **Live transcript.** What Vox says appears sentence-by-sentence as it's spoken, and the last sentence — usually the recommendation — stays readable after the voice stops.
 - **Streaming replies.** Speech starts on the first complete sentence while the local LLM is still generating the rest — sentence N+1 is synthesized while sentence N plays.
-- **Voice commands.** Ask Vox to launch a Claude Code agent on the active project, **send a prompt to any Conductor worktree by name** (Vox drafts the full prompt — context, task, done criteria — from your conversation), or switch which project is active.
-- **100% local.** Speech-to-text via a resident Whisper (`openai-whisper`) daemon, the brain via any model already pulled in Ollama (default `qwen2.5:3b`), text-to-speech via Kokoro (English) or Piper (French), with macOS `say` as a last-resort fallback if neither is installed.
+- **Launch an agent on any repo, as many as you want.** One `launch_agent` command targets a repo name, a worktree codename, or `"here"` for the active project — every repo Conductor knows about, not just the ones with work in progress. Names are matched exactly first, then fuzzily (so a mangled transcription still lands), and a name that matches two repos equally is a spoken question rather than a coin flip. Up to four agents run at once; ⌥Space within two seconds of a launch cancels it, and "stop" kills them all.
+- **Vox tells you when an agent finishes.** As soon as an agent produces an answer — one Vox launched, or one you started inside Conductor — it speaks it: a one-sentence summary, or the answer read out verbatim, depending on a setting (long answers fall back to a summary automatically). Announcements wait for silence, never interrupt you, survive an ⌥Space (they come back rather than being lost), and the result stays in memory so you can ask "what did it say?" afterwards.
+- **Local by default, your choice otherwise.** Speech-to-text via a resident Whisper (`openai-whisper`) daemon; text-to-speech via Kokoro (English) or Piper (French), with macOS `say` as a last-resort fallback. The brain — the model that turns your voice into an action — is a picker: any model pulled in Ollama (default `qwen2.5:3b`, fastest), your **Claude or Codex subscription** through their CLI with no API key, or the Anthropic / OpenAI APIs. A subscription CLI understands more but takes seconds rather than under one; the trade-off is yours.
 - **Bilingual, fully switchable.** French and English each get their own STT language hint, system prompt, and TTS voice. Flipping the toggle in settings restarts the speech daemons and clears the conversation so the model doesn't carry over the wrong language.
 - **Native macOS pill.** Real-time desktop blur clipped to the pill's rounded corners (`window-vibrancy` + `NSVisualEffectView`), floats above fullscreen apps and every Space, animated waveform per state, and a per-letter transcript reveal so you can see what Vox heard.
 - **Barge-in.** Vox's own audio playback runs through the browser's echo-cancelled mic pipeline, so you can just start talking to cut it off mid-sentence — no separate "stop" gesture needed.
 - **Pronunciation dictionary.** Drop word → phonetic pairs in `~/.vox/pronunciations.json` (e.g. `{"Conductor": "conedeuctor"}`) to fix names the TTS engine mangles.
-- **Settings panel** (Cmd+,): pick any locally-installed Ollama model from a live-fetched list, toggle FR/EN, see the running version, and check GitHub for a newer release.
+- **Settings panel** (Cmd+,): choose the brain (provider + model, on one row — the model list follows the provider), toggle FR/EN, pick how agent answers are spoken, see the running version, and check GitHub for a newer release.
 
 ## Requirements
 
@@ -83,8 +98,15 @@ All config lives under `~/.vox/`:
 
 - **`settings.json`** — model and language. Written whenever you change something in the settings panel.
   ```json
-  { "model": "qwen2.5:3b", "language": "en" }
+  {
+    "model": "qwen2.5:3b",
+    "language": "en",
+    "agent_reply": "summary",
+    "agent_reply_max_chars": 420,
+    "tts_engine": "auto"
+  }
   ```
+  `agent_reply` is `summary` (default), `verbatim`, or `off` — `off` still remembers results and still answers questions about them, it just never speaks unprompted. Verbatim switches to a summary past `agent_reply_max_chars` of cleaned text (~30 seconds of speech). `tts_engine` is `auto` (Kokoro for English, Piper for French) or an explicit `kokoro` / `piper` / `qwen3` / `say`.
 - **`projects.json`** — project name → filesystem path, used by the "switch project" voice command. Auto-created on first launch with the folder Vox was started from.
   ```json
   { "vox": "/Users/you/code/vox", "my-app": "/Users/you/code/my-app" }
@@ -93,8 +115,19 @@ All config lives under `~/.vox/`:
   ```json
   { "Conductor": "conedeuctor" }
   ```
+  This doubles as a speech-recognition alias: if you taught the voice to *say* `orivo` as `oreevo`, Vox also accepts hearing "oreevo" and resolves it back.
+- **`aliases.json`** — optional, spoken form → real name, for repos whose names Whisper mangles. Not created automatically.
+  ```json
+  { "orie vo": "orivo" }
+  ```
 
-Advanced: environment variables (`VOX_MODEL`, `VOX_LANG`, `VOX_PROJECT`, `VOX_TTS`, `VOX_SAY_VOICE`, `VOX_AGENT_TIMEOUT`) override the persisted settings at launch, mainly useful for development.
+Advanced: environment variables override the persisted settings at launch, mainly useful for development — `VOX_MODEL`, `VOX_LANG`, `VOX_PROJECT`, `VOX_TTS`, `VOX_SAY_VOICE`, `VOX_AGENT_TIMEOUT`, `VOX_AGENT_REPLY`, plus:
+
+- `VOX_MAX_AGENTS` (default 4) — simultaneous agents. Each one is a full Claude Code process and they share a rate limit; past four a laptop also running Ollama and a speech model starts to crawl. Over the cap Vox refuses out loud rather than queueing silently.
+- `VOX_DRAFT_MODEL` — a second local model used only to expand a spoken request into a full agent prompt. It runs *after* the spoken confirmation, so a bigger model's latency is invisible. Defaults to the main model.
+- `VOX_DEBUG_SAY="…"` — drive one full turn at startup without a microphone. The mic needs a signed bundle, so this is the way to exercise the loop from `npm run tauri dev`.
+
+Two agents in the same worktree is allowed (Vox says "that's two agents on findy now") but they can conflict on files — it's the same situation as two terminals in one directory.
 
 ## How it works
 
@@ -113,11 +146,33 @@ Prerequisites: Node 20+, a stable Rust toolchain, and Xcode Command Line Tools (
 
 ```bash
 npm install
-npm run tauri dev    # run locally with hot reload
+npm run dev          # run locally (file watcher off — see .taurignore)
 npm run tauri build  # produce a release .app bundle
 ```
 
 The GitHub Actions release workflow (`.github/workflows/release.yml`) additionally builds a `.dmg` and attaches it to the release on every `v*` tag push.
+
+## Evaluating a new voice
+
+Qwen3-TTS ships as an **optional third engine**, installed from the setup panel into its own virtualenv (`~/.vox/venv-qwen`) so a failed experiment can't disturb Kokoro or Piper. Once installed, a *Voice* row appears in settings; changing it restarts the daemon and immediately speaks a sample line.
+
+Measure before replacing anything:
+
+```bash
+python3 scripts/vox_tts_bench.py --engines piper,kokoro --langs fr --repeat 3   # baseline first
+python3 scripts/vox_tts_bench.py --engines piper,kokoro,qwen3 --langs fr,en --repeat 3
+```
+
+It drives the daemons exactly as Rust does and writes `report.md` (cold start, time to first sentence, RTF, peak RSS), `bench.json`, the WAVs side by side, and `ab.html` — a blind listening test with the engine names folded away. `report.md` carries the pass/fail thresholds; the quality call is made by ear.
+
+Baseline on an M-series Mac, French, 14 sentences × 2:
+
+| engine | cold ms | 1st sentence | synth p95 | RTF p95 | peak RSS |
+|---|---:|---:|---:|---:|---:|
+| piper | 600 | 111 ms | 111 ms | 0.025 | 365 MB |
+| kokoro | 4901 | 369 ms | 609 ms | 0.105 | 2158 MB |
+
+`scripts/vox_tts_selftest.py` guards the shared text-normalisation module against regressions.
 
 ## Roadmap
 
