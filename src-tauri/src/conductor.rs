@@ -20,6 +20,8 @@ pub struct SessionInfo {
     pub agent: String,
     pub status: String,
     pub unread_count: i64,
+    /// ISO timestamp of the last assistant message, for freshness checks.
+    pub last_activity: Option<String>,
     pub preview: Option<String>,
     /// The user's first message in the session — what this worktree was
     /// originally asked to do. Grounds progress advice.
@@ -31,6 +33,25 @@ pub struct Workspace {
     pub branch: String,
     pub path: String,
     pub session: Option<SessionInfo>,
+}
+
+/// One thing an agent can be launched on: a Conductor worktree, or a repo's
+/// main checkout. Deliberately wider than `read_state` — that one only surfaces
+/// `in-progress` worktrees, which is the right filter for "what's going on"
+/// but far too narrow for "where can I send an agent".
+#[derive(Clone, Debug)]
+pub struct TargetCandidate {
+    /// Spoken/typed name: the worktree codename, or the repo name.
+    pub name: String,
+    /// "worktree" | "repo"
+    pub kind: &'static str,
+    pub repo: String,
+    pub path: String,
+    pub branch: String,
+    /// Normalized timestamp, safe to compare as a string. See `ts_key`.
+    pub ts: String,
+    /// A Conductor UI session is `working` in this exact worktree right now.
+    pub live: bool,
 }
 
 fn sql(query: &str) -> Vec<Value> {
@@ -47,8 +68,27 @@ fn sql(query: &str) -> Vec<Value> {
     }
 }
 
+/// Run a read-only query for another module (the watcher builds its own).
+pub fn sql_public(query: &str) -> Vec<Value> {
+    sql(query)
+}
+
 fn s(v: &Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+
+/// A sortable SQL expression for one of Conductor's `updated_at` columns.
+///
+/// Conductor writes these in TWO formats: the app writes ISO
+/// (`2026-08-06T20:22:54.826Z`) while its own SQL triggers write
+/// `datetime('now')` (`2026-08-06 18:27:10`). Sorting the raw column is
+/// lexicographic, and 'T' (0x54) > ' ' (0x20), so EVERY trigger-written row
+/// sinks below every app-written one regardless of time — off by up to a full
+/// day. That silently corrupts both "most recent worktree wins" tie-breaks and
+/// which worktrees the model is even shown. Normalizing the separator and
+/// dropping the sub-second tail makes both formats compare correctly.
+fn ts_key(col: &str) -> String {
+    format!("substr(replace({col},'T',' '),1,19)")
 }
 
 // Assistant messages are JSON envelopes that differ by agent type — extract
@@ -99,18 +139,50 @@ fn extract_last_assistant_text(raw: &str) -> Option<String> {
     }
 }
 
-fn last_assistant_message(session_id: &str) -> Option<String> {
+pub fn last_assistant_message(session_id: &str) -> Option<String> {
+    last_assistant_entry(session_id).map(|(text, _)| text)
+}
+
+/// The newest human-meaningful assistant text AND when it was sent.
+///
+/// The timestamp is what tells "this agent just finished" apart from "this
+/// agent has been idle since Tuesday". Conductor's own `unread_count` flag
+/// would be the natural signal, but it is 0 on every row in practice — which
+/// is why the recap's "agent is done" line never fired.
+pub fn last_assistant_entry(session_id: &str) -> Option<(String, String)> {
     let rows = sql(&format!(
         "SELECT content, sent_at FROM session_messages \
          WHERE session_id='{session_id}' AND role='assistant' \
          ORDER BY sent_at DESC LIMIT 40;"
     ));
-    rows.iter()
-        .find_map(|row| extract_last_assistant_text(&s(row, "content")))
+    rows.iter().find_map(|row| {
+        extract_last_assistant_text(&s(row, "content")).map(|t| (t, s(row, "sent_at")))
+    })
+}
+
+/// An idle agent counts as "just finished" only if it actually said something
+/// recently.
+///
+/// This replaces a check on `unread_count > 0`, which reads correctly but is
+/// dead: that column is 0 on every session row Conductor writes, so the recap's
+/// "the agent on X is done" line could never fire and finished worktrees were
+/// folded into the "nothing new" group instead. Without the freshness window,
+/// though, a worktree whose agent went idle on Tuesday would be announced as
+/// freshly finished at every launch.
+fn finished_recently(sess: &SessionInfo) -> bool {
+    const FRESH_SECS: u64 = 12 * 3600;
+    let Some(at) = sess.last_activity.as_deref() else { return false };
+    if sess.preview.as_deref().map(|p| p.trim().is_empty()).unwrap_or(true) {
+        return false;
+    }
+    // `sent_at` is uniformly ISO-Z, so a prefix comparison against a computed
+    // cutoff is both correct and dependency-free.
+    let cutoff = crate::watch::iso_at(crate::now_unix().saturating_sub(FRESH_SECS));
+    at > cutoff.as_str()
 }
 
 /// The session's original ask: first meaningful user message.
-fn first_user_message(session_id: &str) -> Option<String> {
+pub fn first_user_message(session_id: &str) -> Option<String> {
     let rows = sql(&format!(
         "SELECT content FROM session_messages \
          WHERE session_id='{session_id}' AND role='user' \
@@ -147,7 +219,8 @@ pub fn read_state(max_items: usize) -> Vec<Workspace> {
          LEFT JOIN repos r ON w.repository_id = r.id \
          WHERE w.state = 'ready' AND w.derived_status = 'in-progress' \
            AND (r.hidden IS NULL OR r.hidden = 0) \
-         ORDER BY w.updated_at DESC LIMIT {max_items};"
+         ORDER BY {TS} DESC LIMIT {max_items};",
+        TS = ts_key("w.updated_at")
     ));
 
     workspaces
@@ -157,6 +230,7 @@ pub fn read_state(max_items: usize) -> Vec<Workspace> {
             let session = if session_id.is_empty() {
                 None
             } else {
+                let entry = last_assistant_entry(&session_id);
                 sql(&format!(
                     "SELECT id, status, agent_type, unread_count FROM sessions WHERE id='{session_id}';"
                 ))
@@ -165,7 +239,8 @@ pub fn read_state(max_items: usize) -> Vec<Workspace> {
                     agent: s(row, "agent_type"),
                     status: s(row, "status"),
                     unread_count: row.get("unread_count").and_then(|v| v.as_i64()).unwrap_or(0),
-                    preview: last_assistant_message(&session_id),
+                    last_activity: entry.as_ref().map(|(_, at)| at.clone()),
+                    preview: entry.as_ref().map(|(t, _)| t.clone()),
                     original_ask: first_user_message(&session_id),
                 })
             };
@@ -179,34 +254,77 @@ pub fn read_state(max_items: usize) -> Vec<Workspace> {
         .collect()
 }
 
-/// Resolve a spoken worktree/project name to its filesystem path. Matches the
-/// repo name, directory name, workspace name, or branch, most recent first.
-pub fn find_workspace_path(name: &str) -> Option<String> {
-    let needle = name.trim().to_lowercase().replace('\'', "''");
-    if needle.is_empty() || needle.chars().count() > 80 {
-        return None;
-    }
-    // Exact name matches MUST outrank the fuzzy branch match — otherwise a
-    // substring hit on another repo's branch could beat the exact repo name
-    // and send a prompt (and an agent) to the wrong worktree.
+/// Every launchable target, most recently touched first.
+///
+/// One query (~12ms on a 375MB DB), no name filtering in SQL — matching happens
+/// in Rust (see `targets`), which both removes the string-interpolation
+/// injection surface and makes fuzzy matching possible.
+///
+/// Deliberately does NOT filter on `derived_status`: a worktree that Conductor
+/// marks `done` or `in-review` is still a perfectly good place to send an
+/// agent, and excluding those is exactly why most of the user's repos used to
+/// be unreachable by voice.
+pub fn catalog() -> Vec<TargetCandidate> {
     let rows = sql(&format!(
-        "SELECT w.workspace_path, \
-           (lower(r.name) = '{needle}' \
-            OR lower(w.directory_name) = '{needle}' \
-            OR lower(w.workspace_name) = '{needle}') AS exact_match \
-         FROM workspaces w \
-         LEFT JOIN repos r ON w.repository_id = r.id \
-         WHERE w.state = 'ready' AND w.workspace_path IS NOT NULL \
-           AND (r.hidden IS NULL OR r.hidden = 0) AND ( \
-            lower(r.name) = '{needle}' \
-            OR lower(w.directory_name) = '{needle}' \
-            OR lower(w.workspace_name) = '{needle}' \
-            OR lower(w.branch) LIKE '%{needle}%') \
-         ORDER BY exact_match DESC, w.updated_at DESC LIMIT 1;"
+        "SELECT COALESCE(NULLIF(w.workspace_name,''), w.directory_name) AS name, \
+                'worktree' AS kind, COALESCE(r.name,'') AS repo, \
+                w.workspace_path AS path, COALESCE(w.branch,'') AS branch, \
+                {TSW} AS ts, \
+                (SELECT COUNT(*) FROM sessions s WHERE s.workspace_id = w.id \
+                   AND s.is_hidden = 0 AND s.status = 'working') AS live \
+           FROM workspaces w LEFT JOIN repos r ON w.repository_id = r.id \
+          WHERE w.state = 'ready' AND w.workspace_path IS NOT NULL \
+            AND (r.hidden IS NULL OR r.hidden = 0) \
+         UNION ALL \
+         SELECT r.name, 'repo', r.name, r.root_path, COALESCE(r.default_branch,''), \
+                {TSR}, 0 \
+           FROM repos r \
+          WHERE (r.hidden IS NULL OR r.hidden = 0) \
+            AND r.root_path IS NOT NULL AND r.root_path <> '' \
+          ORDER BY ts DESC;",
+        TSW = ts_key("w.updated_at"),
+        TSR = ts_key("r.updated_at"),
     ));
-    rows.first()
-        .map(|r| s(r, "workspace_path"))
-        .filter(|p| !p.is_empty() && std::path::Path::new(p).exists())
+
+    rows.iter()
+        .map(|r| TargetCandidate {
+            name: s(r, "name"),
+            kind: if s(r, "kind") == "repo" { "repo" } else { "worktree" },
+            repo: s(r, "repo"),
+            path: s(r, "path"),
+            branch: s(r, "branch"),
+            ts: s(r, "ts"),
+            live: r.get("live").and_then(|v| v.as_i64()).unwrap_or(0) > 0,
+        })
+        // A row whose directory is gone would send an agent nowhere.
+        .filter(|c| {
+            !c.name.is_empty() && !c.path.is_empty() && std::path::Path::new(&c.path).exists()
+        })
+        .collect()
+}
+
+/// Names the model may target, repos first (that's what people actually say),
+/// then worktree codenames. Deduped case-insensitively and capped — this goes
+/// into every system prompt, so it has to stay a single short line.
+pub fn launchable_names(max: usize) -> Vec<String> {
+    let cat = catalog();
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for want_repo in [true, false] {
+        for c in &cat {
+            if (c.kind == "repo") != want_repo {
+                continue;
+            }
+            let key = c.name.to_lowercase();
+            if seen.insert(key) {
+                out.push(c.name.clone());
+            }
+            if out.len() >= max {
+                return out;
+            }
+        }
+    }
+    out
 }
 
 // ── Snippet cleaning (port of cleanActivitySnippet) ──────────────────────────
@@ -309,7 +427,7 @@ fn build_brief_sentences(ws: &[Workspace], en: bool, seed: usize) -> Vec<(String
                         1 => format!("L'agent de {p} te pose une question : {preview}"),
                         _ => format!("Question en attente sur {p} : {preview}"),
                     })
-                } else if sess.unread_count > 0 {
+                } else if finished_recently(sess) {
                     Some(match v % 3 {
                         0 if en => format!("The agent on {p} is done — you'll need to test it."),
                         1 if en => format!("{p} is ready for you to try."),

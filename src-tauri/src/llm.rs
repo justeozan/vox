@@ -1,6 +1,10 @@
-//! Ollama chat loop. Attempt 1 streams the native tools API (qwen2.5,
-//! llama3…) and speaks sentence-by-sentence while the model generates;
-//! attempt 2 falls back to a JSON-object prompt any model can follow (gemma3…).
+//! The chat loop. Attempt 1 streams the native tools API (qwen2.5, llama3, GPT…)
+//! and speaks sentence-by-sentence while the model generates; attempt 2 falls
+//! back to a JSON-object prompt any model can follow (gemma3…).
+//!
+//! Which LLM answers is chosen in `brain.rs`. Subscription CLIs (`claude`,
+//! `codex`) have no tools API at all, so they SKIP attempt 1 and go straight to
+//! the JSON path — the same machinery weak local models already needed.
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::Sender;
@@ -11,10 +15,10 @@ use regex::Regex;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
+use crate::brain::{self, Brain, Transport};
 use crate::speech::{self, SpeechItem};
 use crate::{load_registry, AppState};
 
-const OLLAMA_URL: &str = "http://localhost:11434/v1/chat/completions";
 
 fn vox_tools(en: bool) -> Value {
     // Descriptions follow the UI language so the model isn't nudged toward
@@ -29,32 +33,33 @@ fn vox_tools(en: bool) -> Value {
             }
         })
     };
+    // ONE launch tool, not two. `launch_agent` (active project) and
+    // `prompt_worktree` (named worktree) were the same act differing by a
+    // prepositional phrase, and a 3B asked to "launch an agent on findy" would
+    // routinely pick the active-project one — wrong cwd, silent failure,
+    // confident lie. A single tool makes that whole class impossible.
+    //
+    // `target` is REQUIRED with an explicit sentinel rather than optional: a
+    // small model handles absent-means-default badly (it either always omits
+    // the key or hallucinates a value), but handles a required string whose
+    // description names the fallback token very well.
     if en {
         json!([
             tool(
                 "launch_agent",
-                "Launch a Claude agent on the ACTIVE project for a background development task",
+                "Launch a Claude coding agent in a repository to do a development task in the background. Use this whenever the user asks to launch, start, run, or send work to an agent — on the current project or on any other repo.",
                 json!({
-                    "task": { "type": "string", "description": "Detailed description of the task" },
-                    "text": { "type": "string", "description": "Short spoken reply in English (1-2 sentences)" }
+                    "target": { "type": "string", "description": "Name of the repo or worktree to work in, exactly as listed in LAUNCHABLE TARGETS. Use \"here\" for the active project." },
+                    "task": { "type": "string", "description": "What the user wants done, in one or two sentences, in their own words" },
+                    "text": { "type": "string", "description": "Short spoken reply in English (one sentence)" }
                 }),
-                json!(["task", "text"])
-            ),
-            tool(
-                "prompt_worktree",
-                "Send a prompt to the coding agent of a named Conductor worktree. YOU write the full prompt: context, precise task, constraints, done criteria.",
-                json!({
-                    "project": { "type": "string", "description": "Worktree/project name exactly as listed in the worktree state data" },
-                    "prompt": { "type": "string", "description": "The complete detailed prompt to send to the agent (several sentences)" },
-                    "text": { "type": "string", "description": "Short spoken confirmation in English" }
-                }),
-                json!(["project", "prompt", "text"])
+                json!(["target", "task", "text"])
             ),
             tool(
                 "switch_project",
-                "Change the active project by its name in the ~/.vox/projects.json registry",
+                "Change which project is ACTIVE (does not launch anything). Accepts any name from LAUNCHABLE TARGETS or the ~/.vox/projects.json registry.",
                 json!({
-                    "name": { "type": "string", "description": "Project name in the registry" },
+                    "name": { "type": "string", "description": "Repo, worktree, or registry name" },
                     "text": { "type": "string", "description": "Short spoken reply in English" }
                 }),
                 json!(["name", "text"])
@@ -64,28 +69,19 @@ fn vox_tools(en: bool) -> Value {
         json!([
             tool(
                 "launch_agent",
-                "Lance un agent Claude sur le projet ACTIF pour une tâche de développement en arrière-plan",
+                "Lance un agent Claude dans un dépôt pour une tâche de développement en arrière-plan. À utiliser dès que l'utilisateur demande de lancer, démarrer, ou envoyer du travail à un agent — sur le projet courant ou sur n'importe quel autre dépôt.",
                 json!({
-                    "task": { "type": "string", "description": "Description détaillée de la tâche" },
-                    "text": { "type": "string", "description": "Réponse vocale courte à prononcer (1-2 phrases)" }
+                    "target": { "type": "string", "description": "Nom du dépôt ou du worktree où travailler, exactement comme listé dans CIBLES DISPONIBLES. Mets \"ici\" pour le projet actif." },
+                    "task": { "type": "string", "description": "Ce que l'utilisateur veut faire, en une ou deux phrases, avec ses mots" },
+                    "text": { "type": "string", "description": "Réponse vocale courte en français (une phrase)" }
                 }),
-                json!(["task", "text"])
-            ),
-            tool(
-                "prompt_worktree",
-                "Envoie un prompt à l'agent d'un worktree Conductor nommé. C'est TOI qui rédiges le prompt complet : contexte, tâche précise, contraintes, critères de fin.",
-                json!({
-                    "project": { "type": "string", "description": "Nom du worktree/projet tel que listé dans l'état des worktrees" },
-                    "prompt": { "type": "string", "description": "Le prompt détaillé complet à envoyer à l'agent (plusieurs phrases)" },
-                    "text": { "type": "string", "description": "Confirmation vocale courte" }
-                }),
-                json!(["project", "prompt", "text"])
+                json!(["target", "task", "text"])
             ),
             tool(
                 "switch_project",
-                "Change le projet actif par son nom dans le registre ~/.vox/projects.json",
+                "Change le projet ACTIF (ne lance rien). Accepte n'importe quel nom des CIBLES DISPONIBLES ou du registre ~/.vox/projects.json.",
                 json!({
-                    "name": { "type": "string", "description": "Nom du projet dans le registre" },
+                    "name": { "type": "string", "description": "Nom de dépôt, de worktree, ou du registre" },
                     "text": { "type": "string", "description": "Réponse vocale courte" }
                 }),
                 json!(["name", "text"])
@@ -94,13 +90,8 @@ fn vox_tools(en: bool) -> Value {
     }
 }
 
-fn post_chat(body: &Value, timeout_secs: u64) -> Result<Value, String> {
-    ureq::post(OLLAMA_URL)
-        .timeout(Duration::from_secs(timeout_secs))
-        .send_json(body.clone())
-        .map_err(|e| e.to_string())?
-        .into_json::<Value>()
-        .map_err(|e| e.to_string())
+fn post_chat(brain: &Brain, body: &Value, timeout_secs: u64) -> Result<Value, String> {
+    brain.post(body, timeout_secs)
 }
 
 /// Stream an SSE chat completion, invoking `on_delta` with each
@@ -111,16 +102,18 @@ fn post_chat(body: &Value, timeout_secs: u64) -> Result<Value, String> {
 /// slow generations) returns Ok with whatever was streamed, since the spoken
 /// sentences cannot be unsaid.
 fn stream_chat(
+    brain: &Brain,
     body: &Value,
     timeout_secs: u64,
     cancel: &dyn Fn() -> bool,
     mut on_delta: impl FnMut(&Value),
 ) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
-    let resp = ureq::post(OLLAMA_URL)
-        .timeout(Duration::from_secs(timeout_secs))
-        .send_json(body.clone())
-        .map_err(|e| e.to_string())?;
+    let mut req = ureq::post(brain.url).timeout(Duration::from_secs(timeout_secs));
+    if let Some(k) = brain.api_key() {
+        req = req.set("Authorization", &format!("Bearer {k}"));
+    }
+    let resp = req.send_json(body.clone()).map_err(|e| e.to_string())?;
     let mut saw_data = false;
     for line in BufReader::new(resp.into_reader()).lines() {
         if cancel() {
@@ -150,18 +143,18 @@ fn stream_chat(
 
 /// One-shot chat helper (no history, no tools).
 pub fn chat_once(model: &str, system: &str, user: &str, max_tokens: u32) -> Option<String> {
-    let body = json!({
-        "model": model,
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user", "content": user }
-        ],
-        "max_tokens": max_tokens,
-        "stream": false
-    });
-    let data = post_chat(&body, 60).ok()?;
-    let text = data["choices"][0]["message"]["content"].as_str()?.trim().to_string();
-    Some(text.trim_matches(|c| c == '"' || c == '\'').to_string())
+    // `model` is kept as the parameter for the existing call sites; the
+    // provider comes from settings via brain_for().
+    let b = brain_from_model(model);
+    let text = b.complete(system, user, max_tokens)?;
+    Some(text.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+}
+
+/// Resolve a Brain when only a model id is at hand. The provider is global, so
+/// this reads it from the persisted settings file rather than threading state
+/// through every call site.
+fn brain_from_model(model: &str) -> Brain {
+    brain::resolve(&crate::persisted_provider(), model)
 }
 
 /// Streamed one-shot chat: `on_sentence` fires as each sentence completes,
@@ -189,7 +182,19 @@ pub fn chat_once_stream(
     let mut sbuf = speech::SentenceBuffer::new();
     let mut full = String::new();
     let mut emitted = 0usize;
-    let res = stream_chat(&body, 90, cancel, |delta| {
+    let b = brain_from_model(model);
+    // A subscription CLI can't stream — one blocking call, split afterwards.
+    if b.transport == Transport::Cli {
+        let text = b.complete(system, user, max_tokens)?;
+        for sentence in speech::split_sentences(&text) {
+            if cancel() {
+                break;
+            }
+            on_sentence(sentence);
+        }
+        return Some(text);
+    }
+    let res = stream_chat(&b, &body, 90, cancel, |delta| {
         if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
             full.push_str(c);
             for s in sbuf.push(c) {
@@ -226,83 +231,175 @@ pub fn chat_once_stream(
 
 /// Execute one tool action; returns an override voice line (e.g. unknown
 /// project) or None to keep the model-provided text.
+/// What an action did, from the point of view of what should be SAID.
+///
+/// Three states, not two: resolution can succeed while the model's spoken line
+/// is still wrong (it named one repo, we resolved another; there's already an
+/// agent there). That's neither "say the model's line" nor "the action failed".
+pub enum ActionOutcome {
+    /// Nothing to add — speak the model's `text`.
+    Ok,
+    /// Succeeded, but the model's line is imprecise or incomplete. Outranks it.
+    Amend(String),
+    /// FAILED. Speaking the model's confirmation would be a lie.
+    Failed(String),
+}
+
+impl ActionOutcome {
+    /// The line that must replace the model's `text`, if any.
+    fn line(self) -> Option<String> {
+        match self {
+            ActionOutcome::Ok => None,
+            ActionOutcome::Amend(s) | ActionOutcome::Failed(s) => Some(s),
+        }
+    }
+}
+
 fn apply_action(
     app: &AppHandle,
     state: &Arc<AppState>,
     registry: &serde_json::Map<String, Value>,
     name: &str,
     args: &Value,
-) -> Option<String> {
+) -> ActionOutcome {
+    use crate::targets::{self, Resolution};
     let en = state.settings.lock().unwrap().language == "en";
     match name {
-        "launch_agent" => {
-            if let Some(task) = args.get("task").and_then(|t| t.as_str()) {
-                // spawn_agent emits `delegation` itself once the agent actually
-                // starts; a false return means it never launched.
-                if !crate::agents::spawn_agent(app, state, task) {
-                    return Some(if en {
-                        "I couldn't launch the agent — is the Claude CLI installed?".into()
-                    } else {
-                        "Je n'ai pas pu lancer l'agent — le CLI Claude est-il installé ?".into()
-                    });
-                }
-            }
-            None
-        }
-        "prompt_worktree" => {
-            let project = args.get("project").and_then(|n| n.as_str()).unwrap_or("");
-            let prompt = args.get("prompt").and_then(|p| p.as_str()).unwrap_or("");
-            if prompt.trim().is_empty() {
-                return Some(if en {
-                    "I need a prompt to send.".into()
+        // `prompt_worktree` is the pre-merge name: unadvertised, still accepted,
+        // because a model can echo it back out of mid-session history.
+        "launch_agent" | "prompt_worktree" => {
+            let raw_target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .or_else(|| args.get("project").and_then(|v| v.as_str()))
+                .unwrap_or("here");
+            let task = args
+                .get("task")
+                .and_then(|v| v.as_str())
+                .or_else(|| args.get("prompt").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .trim();
+            if task.is_empty() {
+                return ActionOutcome::Failed(if en {
+                    "I need to know what the agent should do.".into()
                 } else {
-                    "Il me faut un prompt à envoyer.".into()
+                    "Il me faut savoir quoi demander à l'agent.".into()
                 });
             }
-            match crate::conductor::find_workspace_path(project) {
-                Some(path) => {
-                    // spawn_agent_in echoes the exact prompt to the UI (the
-                    // `delegation` event) only once the agent really starts, and
-                    // returns false if it couldn't launch — so we never confirm
-                    // a delegation that never happened.
-                    if crate::agents::spawn_agent_in(app, state, project, &path, prompt) {
-                        None
-                    } else {
-                        Some(if en {
-                            "I found the worktree but couldn't launch the agent.".into()
-                        } else {
-                            "J'ai trouvé le worktree mais je n'ai pas pu lancer l'agent.".into()
-                        })
+            let target = match targets::resolve_target(state, raw_target) {
+                Resolution::Found(t) => t,
+                Resolution::Ambiguous { options, .. } => {
+                    return ActionOutcome::Failed(targets::ask_which(en, &options))
+                }
+                Resolution::Unknown { needle } => {
+                    return ActionOutcome::Failed(targets::unknown_line(en, &needle))
+                }
+            };
+            let already = crate::agents::count_in(state, &target.path);
+            match crate::agents::launch(app, state, &target, task) {
+                Ok(_) => {
+                    println!("[vox] agent → {} ({})", target.label, target.path);
+                    match amend_line(en, &target, already, args) {
+                        Some(l) => ActionOutcome::Amend(l),
+                        None => ActionOutcome::Ok,
                     }
                 }
-                None => Some(if en {
-                    format!("I can't find the worktree \"{project}\".")
-                } else {
-                    format!("Je ne trouve pas le worktree \"{project}\".")
-                }),
+                Err(e) => ActionOutcome::Failed(launch_error_line(en, &e, &target.label)),
             }
         }
         "switch_project" => {
             let pname = args.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            // Registry first (that's what this tool has always meant), then the
+            // full resolver — so "switch to findy" works even for a repo that
+            // was never added to projects.json.
             let resolved = registry
                 .get(pname)
                 .and_then(|v| v.as_str())
                 .map(String::from)
-                .or_else(|| args.get("path").and_then(|p| p.as_str()).map(String::from));
+                .or_else(|| args.get("path").and_then(|p| p.as_str()).map(String::from))
+                .filter(|p| std::path::Path::new(p).exists())
+                .or_else(|| match targets::resolve_target(state, pname) {
+                    Resolution::Found(t) => Some(t.path),
+                    _ => None,
+                });
             match resolved {
                 Some(p) => {
                     println!("[vox] switched project to: {p}");
                     *state.active_project.lock().unwrap() = p;
-                    None
+                    ActionOutcome::Ok
                 }
-                None => Some(if en {
-                    format!("I don't know the project \"{pname}\". Add it to ~/.vox/projects.json.")
-                } else {
-                    format!("Je ne connais pas le projet \"{pname}\". Ajoute-le dans ~/.vox/projects.json.")
-                }),
+                // The registry goes stale (a worktree is archived, a folder
+                // moves) and nothing used to catch it: spawn() failed later,
+                // inside the worker thread, long after this returned — so the
+                // user heard a confident "launching" and nothing happened.
+                None => ActionOutcome::Failed(targets::unknown_line(en, pname)),
             }
         }
-        _ => None,
+        _ => ActionOutcome::Ok,
+    }
+}
+
+/// Say the RESOLVED target whenever it isn't already what the model said.
+/// The user hears the mistake about a second into a ten-minute task — which is
+/// worth more than a confirmation prompt, and costs no extra turn.
+fn amend_line(en: bool, target: &crate::targets::Target, already: usize, args: &Value) -> Option<String> {
+    use crate::targets::{MatchKind, TargetSource};
+    let said = args.get("text").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+    let label = &target.label;
+
+    if already > 0 {
+        let n = already + 1;
+        return Some(if en {
+            format!("On it — that's {n} agents on {label} now.")
+        } else {
+            format!("C'est parti, ça fait {n} agents sur {label}.")
+        });
+    }
+    // A headless agent editing files under a live Conductor session is the one
+    // genuinely surprising collision. Don't block it — just say it.
+    if target.live_session {
+        return Some(if en {
+            format!("A Conductor agent is already working on {label} — launching anyway.")
+        } else {
+            format!("L'agent Conductor bosse déjà sur {label}, je lance quand même.")
+        });
+    }
+    if let TargetSource::RepoRoot { .. } = target.source {
+        return Some(if en {
+            format!("On {label}, straight on the repo — no worktree.")
+        } else {
+            format!("Sur {label}, direct sur le repo — pas de worktree.")
+        });
+    }
+    // Fuzzy hit, or a repo that resolved to a worktree: name where it actually
+    // went if the spoken line doesn't already contain it.
+    let bare = label.split(" (").next().unwrap_or(label).to_lowercase();
+    if target.confidence != MatchKind::Exact || !said.contains(&bare) {
+        return Some(if en {
+            format!("Launching on {label}.")
+        } else {
+            format!("Je lance sur {label}.")
+        });
+    }
+    None
+}
+
+fn launch_error_line(en: bool, e: &crate::agents::LaunchError, label: &str) -> String {
+    use crate::agents::LaunchError as E;
+    match (e, en) {
+        (E::NoCli, true) => "Claude Code isn't installed — I can't launch agents.".into(),
+        (E::NoCli, false) => "Claude Code n'est pas installé, je ne peux pas lancer d'agent.".into(),
+        (E::BadCwd(l), true) => format!("{l}'s folder is gone."),
+        (E::BadCwd(l), false) => format!("Le dossier de {l} n'existe plus."),
+        // Refuse, never queue: a voice "ok" followed by ten minutes of nothing
+        // is worse than an honest no, and the announcements make "wait for one
+        // to finish" a zero-effort instruction.
+        (E::TooMany(n), true) => format!("{n} agents already running — wait for one to finish."),
+        (E::TooMany(n), false) => format!("Déjà {n} agents en route, attends qu'il y en ait un qui finisse."),
+        (E::Cancelled, true) => "Cancelled.".into(),
+        (E::Cancelled, false) => "Annulé.".into(),
+        (E::SpawnFailed(_), true) => format!("The agent didn't start on {label}."),
+        (E::SpawnFailed(_), false) => format!("L'agent n'a pas démarré sur {label}."),
     }
 }
 
@@ -323,7 +420,7 @@ fn execute_parsed(
     for item in &actions {
         let action = item.get("action").and_then(|a| a.as_str()).unwrap_or("none");
         if action != "none" {
-            if let Some(ov) = apply_action(app, state, registry, action, item) {
+            if let Some(ov) = apply_action(app, state, registry, action, item).line() {
                 if override_voice.is_empty() {
                     override_voice = ov;
                 }
@@ -344,6 +441,92 @@ fn execute_parsed(
     }
 }
 
+// ── Prompt drafting ──────────────────────────────────────────────────────────
+
+/// Expand the short spoken task into a real agent prompt.
+///
+/// Runs on the agent's worker thread, AFTER the spoken confirmation has already
+/// gone out, so its latency is invisible. That's also why the tool schema now
+/// asks for a one-or-two-sentence `task` instead of a full prompt: a long field
+/// inside a tool call under `max_tokens: 300` truncates the JSON, and
+/// `parse_json` then suppresses the reply entirely — the user hears nothing at
+/// all. Drafting here is unbounded and can use a bigger local model.
+pub fn draft_prompt(state: &Arc<AppState>, target_label: &str, task: &str) -> String {
+    let (model, en) = {
+        let s = state.settings.lock().unwrap();
+        (
+            std::env::var("VOX_DRAFT_MODEL").unwrap_or_else(|_| s.model.clone()),
+            s.language == "en",
+        )
+    };
+
+    // The user's own words beat a 3B's paraphrase, and they're free.
+    let recent: Vec<String> = state
+        .history
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+        .filter_map(|m| m.get("content").and_then(|c| c.as_str()).map(String::from))
+        .take(3)
+        .collect();
+    let quoted = recent
+        .iter()
+        .rev()
+        .map(|l| format!("  \"{}\"", l.chars().take(200).collect::<String>()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let sys = if en {
+        "You turn a developer's spoken request into a precise prompt for a coding agent. Write the prompt itself and nothing else: no preamble, no explanation, no markdown fences. 3 to 6 sentences."
+    } else {
+        "Tu transformes la demande orale d'un développeur en prompt précis pour un agent de code. Écris le prompt lui-même et rien d'autre : pas de préambule, pas d'explication, pas de balises markdown. 3 à 6 phrases."
+    };
+    let user = if en {
+        format!("Repository: {target_label}\nWhat they asked for: {task}\n\nWrite the prompt.")
+    } else {
+        format!("Dépôt : {target_label}\nCe qu'ils demandent : {task}\n\nÉcris le prompt.")
+    };
+    let drafted = chat_once(&model, sys, &user, 500)
+        .map(|d| d.trim().to_string())
+        .filter(|d| d.chars().count() >= 40)
+        .unwrap_or_else(|| task.to_string());
+
+    // The scaffolding is assembled in Rust and is ALWAYS present, whatever the
+    // model does — including the closing instruction, which is what makes the
+    // agent produce an answer worth reading aloud.
+    let ctx = if quoted.is_empty() {
+        String::new()
+    } else if en {
+        format!("\n\nContext from a voice conversation (may be partial — verify against the repo):\n{quoted}")
+    } else {
+        format!("\n\nContexte issu d'une conversation vocale (possiblement partiel — vérifie dans le repo) :\n{quoted}")
+    };
+
+    if en {
+        format!(
+            "{drafted}{ctx}\n\n\
+             Constraints: work only in this repository. Make the smallest change that satisfies \
+             the request. Run the project's existing tests if there are any. Do not commit or push \
+             unless explicitly asked.\n\n\
+             Done when: the change is implemented and the repo builds / tests pass.\n\
+             End your final message with a one-sentence summary of what you changed, written to be \
+             read aloud."
+        )
+    } else {
+        format!(
+            "{drafted}{ctx}\n\n\
+             Contraintes : travaille uniquement dans ce dépôt. Fais le plus petit changement qui \
+             satisfait la demande. Lance les tests existants s'il y en a. Ne commit ni ne push sans \
+             demande explicite.\n\n\
+             Terminé quand : le changement est implémenté et le repo build / les tests passent.\n\
+             Termine ton message final par une phrase unique résumant ce que tu as changé, écrite \
+             pour être lue à voix haute."
+        )
+    }
+}
+
 // ── System prompt ────────────────────────────────────────────────────────────
 
 fn build_system(state: &Arc<AppState>) -> String {
@@ -359,7 +542,9 @@ fn build_system(state: &Arc<AppState>) -> String {
 
     // Rich per-workspace state from the Conductor DB. Language-aware
     // descriptors so the model doesn't drift into French in English mode.
-    let ws = crate::conductor::read_state(10);
+    // Six, not ten: this block is the expensive part of the prompt and it now
+    // shares room with the launchable-target list. The recap path keeps 10.
+    let ws = crate::conductor::read_state(6);
     let mut workspace_context = String::new();
     if !ws.is_empty() {
         let lines = ws
@@ -383,7 +568,7 @@ fn build_system(state: &Arc<AppState>) -> String {
                         .original_ask
                         .as_deref()
                         .map(|a| {
-                            let a: String = a.chars().take(120).collect();
+                            let a: String = a.chars().take(80).collect();
                             if en {
                                 format!(" — original ask: \"{a}\"")
                             } else {
@@ -404,6 +589,27 @@ fn build_system(state: &Arc<AppState>) -> String {
         workspace_context = format!("{heading}\n{lines}");
     }
 
+    // Names the model may TARGET. The state block above only carries
+    // in-progress worktrees, so without this the model is forbidden (by the
+    // "never invent a project" rule) from aiming at most of the user's repos.
+    let names = crate::conductor::launchable_names(24);
+    let catalog_block = if names.is_empty() {
+        String::new()
+    } else {
+        let list = names.join(", ");
+        if en {
+            format!("\n\nLAUNCHABLE TARGETS (you may send an agent to ANY of these):\n{list}")
+        } else {
+            format!("\n\nCIBLES DISPONIBLES (tu peux envoyer un agent sur N'IMPORTE LAQUELLE) :\n{list}")
+        }
+    };
+    let results_block = crate::announce::results_block(state, en);
+    // Running agents FIRST: "where are we at?" is most often about the thing
+    // that hasn't finished yet.
+    let live_block = crate::agents::status_block(state, en);
+    let workspace_context =
+        format!("{workspace_context}{catalog_block}{live_block}{results_block}");
+
     if en {
         format!(
             "You are Vox, a voice AI assistant for a developer running many Conductor worktrees in parallel.\n\
@@ -413,7 +619,8 @@ fn build_system(state: &Arc<AppState>) -> String {
              - No lists, no file paths in the reply\n\
              - When asked about a project, SUMMARIZE the agent's last update in English — the data below may be in French; translate it, never quote French verbatim\n\
              - To judge progress, compare the agent's last message to the original ask in the data\n\
-             - To delegate work to a specific worktree, call prompt_worktree — YOU write the full prompt (context, precise task, done criteria) from the conversation; keep 'text' to one sentence\n\
+             - To start work anywhere, call launch_agent with the repo or worktree name as 'target' (or \"here\" for the active project); 'task' is one or two sentences in the user's own words\n\
+             - The state data answers STATUS questions. To LAUNCH you may target any name in LAUNCHABLE TARGETS, even one with no state shown\n\
              - Never invent a project name, PR, or bug not in the data\n\n\
              Active project: {active_name}{workspace_context}\n\n\
              REMINDER: Answer in English, one short sentence."
@@ -427,7 +634,8 @@ fn build_system(state: &Arc<AppState>) -> String {
              - Pas de liste, pas de chemin de fichier dans la réponse\n\
              - Quand on te demande où en est un projet, cite ce que l'agent a dit en dernier dans les données ci-dessous\n\
              - Pour juger l'avancement, compare le dernier message de l'agent à la demande initiale dans les données\n\
-             - Pour déléguer du travail à un worktree précis, appelle prompt_worktree — c'est TOI qui rédiges le prompt complet (contexte, tâche précise, critères de fin) à partir de la conversation ; 'text' reste une phrase\n\
+             - Pour lancer du travail où que ce soit, appelle launch_agent avec le nom du dépôt ou du worktree dans 'target' (ou \"ici\" pour le projet actif) ; 'task' fait une ou deux phrases, avec les mots de l'utilisateur\n\
+             - Les données d'état servent aux questions de STATUT. Pour LANCER, tu peux viser n'importe quel nom des CIBLES DISPONIBLES, même sans état affiché\n\
              - N'invente jamais un projet, une PR, ou un bug qui n'est pas dans les données\n\n\
              Projet actif : {active_name}{workspace_context}\n\n\
              RAPPEL : Réponds en français, une phrase courte."
@@ -461,15 +669,51 @@ fn looks_like_inline_tool(s: &str) -> bool {
 /// possible), execute tool actions, and SPEAK the reply. Speech starts on the
 /// first complete sentence while the model is still generating. Every path
 /// ends with a speaking-done (directly or via the speech session).
+/// Conversation turns replayed into every Ollama call. Bounded because the
+/// whole history is re-sent each turn: unbounded growth silently degrades a 3B
+/// model's answers over a long session, then starts costing real latency.
+const MAX_HISTORY: usize = 24;
+
 pub fn ask_ollama(app: &AppHandle, state: &Arc<AppState>, transcript: &str) {
-    state
-        .history
-        .lock()
-        .unwrap()
-        .push(json!({ "role": "user", "content": transcript }));
+    {
+        let mut h = state.history.lock().unwrap();
+        h.push(json!({ "role": "user", "content": transcript }));
+        if h.len() > MAX_HISTORY {
+            let drop = h.len() - MAX_HISTORY;
+            h.drain(..drop);
+        }
+    }
 
     let registry = load_registry();
+    let (provider, model_id) = {
+        let st = state.settings.lock().unwrap();
+        (st.provider.clone(), st.model.clone())
+    };
+    let brain = brain::resolve(&provider, &model_id);
+    // Refuse out loud rather than time out silently: a missing key or an
+    // uninstalled CLI is a setup problem the user can fix in one action.
+    if let Some(why) = brain.unavailable() {
+        let en = state.settings.lock().unwrap().language == "en";
+        eprintln!("[vox] provider {provider} unavailable: {why}");
+        speech::speak(
+            app,
+            state,
+            &if en {
+                format!("I can't reach {provider} — {why}.")
+            } else {
+                format!("Je ne peux pas utiliser {provider} — {why}.")
+            },
+        );
+        return;
+    }
     let base_system = build_system(state);
+    // The default model is a 3B: prompt size is the first thing to look at when
+    // tool-calling gets flaky. ~4 chars/token is close enough for French.
+    println!(
+        "[vox] system prompt ~{} tok ({} chars)",
+        base_system.chars().count() / 4,
+        base_system.chars().count()
+    );
     let (model, en) = {
         let s = state.settings.lock().unwrap();
         (s.model.clone(), s.language == "en")
@@ -479,6 +723,10 @@ pub fn ask_ollama(app: &AppHandle, state: &Arc<AppState>, transcript: &str) {
     let mut messages = vec![json!({ "role": "system", "content": base_system })];
     messages.extend(history.iter().cloned());
 
+    // A subscription CLI exposes no tools API and cannot stream, so attempt 1
+    // is meaningless for it — jump straight to the JSON-object path.
+    let skip_tools = brain.transport == Transport::Cli;
+
     // ── Attempt 1 : native tools API, streamed ──────────────────────────────
     let mut full = String::new();
     let mut sbuf = speech::SentenceBuffer::new();
@@ -486,7 +734,11 @@ pub fn ask_ollama(app: &AppHandle, state: &Arc<AppState>, transcript: &str) {
     let mut suppressed = false;
     let mut tool_acc: BTreeMap<u64, (String, String)> = BTreeMap::new();
 
-    let stream_res = stream_chat(
+    let stream_res = if skip_tools {
+        Err("cli provider: no tools api".to_string())
+    } else {
+        stream_chat(
+        &brain,
         &json!({
             "model": model,
             "messages": messages,
@@ -544,7 +796,8 @@ pub fn ask_ollama(app: &AppHandle, state: &Arc<AppState>, transcript: &str) {
                 }
             }
         },
-    );
+        )
+    };
 
     match stream_res {
         Ok(()) => {
@@ -559,7 +812,7 @@ pub fn ask_ollama(app: &AppHandle, state: &Arc<AppState>, transcript: &str) {
                             text_voice = t.to_string();
                         }
                     }
-                    if let Some(ov) = apply_action(app, state, &registry, name, &args) {
+                    if let Some(ov) = apply_action(app, state, &registry, name, &args).line() {
                         if override_voice.is_empty() {
                             override_voice = ov;
                         }
@@ -609,10 +862,11 @@ pub fn ask_ollama(app: &AppHandle, state: &Arc<AppState>, transcript: &str) {
                             .and_then(|t| t.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let override_v = apply_action(app, state, &registry, &tool_name, &args);
+                        let override_v = apply_action(app, state, &registry, &tool_name, &args).line();
                         println!("[vox] text-tool response: {tool_name}");
-                        // Override = the action failed; it outranks the
-                        // model's optimistic confirmation.
+                        // An override outranks the model's optimistic line:
+                        // either the action failed, or it landed somewhere the
+                        // model didn't name.
                         override_v.unwrap_or(text_v)
                     } else {
                         execute_parsed(app, state, &registry, parse_json(&text))
@@ -688,8 +942,8 @@ pub fn ask_ollama(app: &AppHandle, state: &Arc<AppState>, transcript: &str) {
              The \"text\" field must be in ENGLISH.\n\
              Examples:\n\
              {{\"action\":\"none\",\"text\":\"Yes, I hear you.\"}}\n\
-             {{\"action\":\"launch_agent\",\"task\":\"Fix the failing unit tests\",\"text\":\"I'm launching the agent on the tests.\"}}\n\
-             {{\"action\":\"prompt_worktree\",\"project\":\"my-app\",\"prompt\":\"Fix the login redirect: after OAuth the user lands on /404. Reproduce, fix, add a test.\",\"text\":\"Sending the prompt to my-app.\"}}\n\
+             {{\"action\":\"launch_agent\",\"target\":\"here\",\"task\":\"Fix the failing unit tests\",\"text\":\"Launching an agent on the tests.\"}}\n\
+             {{\"action\":\"launch_agent\",\"target\":\"my-app\",\"task\":\"Fix the login redirect that lands on /404 after OAuth\",\"text\":\"Agent heading out on my-app.\"}}\n\
              {{\"action\":\"switch_project\",\"name\":\"my-app\",\"text\":\"Switching to my-app.\"}}"
         )
     } else {
@@ -698,31 +952,75 @@ pub fn ask_ollama(app: &AppHandle, state: &Arc<AppState>, transcript: &str) {
              Réponds TOUJOURS avec un objet JSON valide sur une seule ligne, sans aucun texte autour.\n\
              Exemples :\n\
              {{\"action\":\"none\",\"text\":\"Oui, je t'entends bien.\"}}\n\
-             {{\"action\":\"launch_agent\",\"task\":\"Corriger les tests unitaires qui échouent\",\"text\":\"Je lance l'agent sur les tests.\"}}\n\
-             {{\"action\":\"prompt_worktree\",\"project\":\"mon-app\",\"prompt\":\"Corrige la redirection login : après OAuth on atterrit sur /404. Reproduis, corrige, ajoute un test.\",\"text\":\"J'envoie le prompt à mon-app.\"}}\n\
+             {{\"action\":\"launch_agent\",\"target\":\"ici\",\"task\":\"Corriger les tests unitaires qui échouent\",\"text\":\"Je lance un agent sur les tests.\"}}\n\
+             {{\"action\":\"launch_agent\",\"target\":\"mon-app\",\"task\":\"Corriger la redirection login qui tombe sur /404 après OAuth\",\"text\":\"L'agent part sur mon-app.\"}}\n\
              {{\"action\":\"switch_project\",\"name\":\"mon-app\",\"text\":\"Je passe sur mon-app.\"}}"
         )
     };
     let mut messages2 = vec![json!({ "role": "system", "content": json_system })];
     messages2.extend(state.history.lock().unwrap().iter().cloned());
 
-    let data = match post_chat(
-        &json!({ "model": model, "messages": messages2, "max_tokens": 300, "stream": false }),
-        90,
-    ) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("[vox] ollama JSON fallback failed: {e}");
-            let _ = app.emit("speaking-done", ());
-            return;
+    // A CLI provider has no HTTP endpoint at all — `post_chat` would POST to an
+    // empty URL and fail. Route it through the transport-aware helper instead;
+    // this is the ONLY path a subscription CLI ever takes.
+    let raw = if brain.transport == Transport::Cli {
+        // History is replayed as plain text: the CLI takes one prompt, not a
+        // messages array.
+        let convo = state
+            .history
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .take(6)
+            .filter_map(|m| {
+                let role = m.get("role")?.as_str()?;
+                let content = m.get("content")?.as_str()?;
+                Some(format!("{role}: {content}"))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        match brain.complete(&json_system, &convo, 300) {
+            Some(t) => t,
+            None => {
+                eprintln!("[vox] {} produced no reply", brain.id);
+                let _ = app.emit("speaking-done", ());
+                return;
+            }
         }
+    } else {
+        let data = match post_chat(
+            &brain,
+            &json!({ "model": model, "messages": messages2, "max_tokens": 300, "stream": false }),
+            90,
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                // Both attempts failed. Saying nothing is the worst outcome:
+                // the user pressed a key, spoke, and got silence with no idea
+                // why. The common cause by far is a model that is configured
+                // but not pulled, so name it.
+                eprintln!("[vox] {} request failed: {e}", brain.id);
+                let missing = e.contains("404") || e.to_lowercase().contains("not found");
+                let line = match (en, missing) {
+                    (true, true) => format!("The model {model} isn't installed. Pull it, or pick another one in settings."),
+                    (false, true) => format!("Le modèle {model} n'est pas installé. Télécharge-le, ou choisis-en un autre dans les réglages."),
+                    (true, false) => format!("I couldn't reach {}.", brain.id),
+                    (false, false) => format!("Je n'arrive pas à joindre {}.", brain.id),
+                };
+                speech::speak(app, state, &line);
+                return;
+            }
+        };
+        data["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string()
     };
-
-    let raw = data["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .to_string();
     state
         .history
         .lock()
