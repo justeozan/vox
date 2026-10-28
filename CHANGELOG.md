@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.5.0
+
+Orca becomes the workspace backend, and Vox behaves like a real Mac app.
+
+### Added
+- **Orca backend (default).** The recap, agent counts and "agent finished"
+  announcements read live state from the `orca` CLI (`worktree ps`,
+  `repo list`). Voice-launched agents open as a Claude terminal tab in Orca, so
+  you can watch, answer and approve them there; "stop" closes the tab.
+  Conductor stays selectable under **Settings → Backend** and switches without
+  a restart.
+- **Persistent logs** in `~/Library/Logs/Vox/vox.log` (rotated at 5 MB) when
+  launched from Finder or the Dock.
+- **Agent guard rails** on the headless path: `git push`, `git reset --hard`,
+  `rm -rf`, `sudo`, `gh pr merge`, publishing commands and friends are passed as
+  `--disallowedTools`.
+- CI: `cargo clippy -D warnings` and `cargo test` on every PR.
+
+### Fixed
+- **Vox didn't act like an app.** It now has a Dock icon, a menu bar
+  (⌘Q quits, ⌘W hides the pill, ⌘, opens settings), a tray menu, and clicking
+  the Dock icon brings the pill back. Quitting stops the speech daemons.
+- **The task prompt could drift from what you said.** The small model's
+  rewrite came first and could invent work (a "deployment checklist" for a
+  one-line question). Your transcribed words now lead as the reference; the
+  rewrite is marked as possibly wrong, and questions don't modify files.
+- Speech-to-text could start on the system Python instead of `~/.vox/venv`.
+
 ## 0.4.0
 
 The release that closes the loop: launch an agent on any repo by voice, follow it

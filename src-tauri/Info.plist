@@ -4,7 +4,5 @@
 <dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>Vox écoute ta voix pour piloter tes agents Conductor.</string>
-  <key>LSUIElement</key>
-  <true/>
 </dict>
 </plist>

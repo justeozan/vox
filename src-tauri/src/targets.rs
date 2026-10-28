@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::conductor::{self, TargetCandidate};
+use crate::workspace::{self, TargetCandidate};
 use crate::AppState;
 
 /// A resolved place to run an agent.
@@ -21,7 +21,7 @@ pub struct Target {
     pub path: String,
     pub source: TargetSource,
     pub confidence: MatchKind,
-    /// A Conductor UI session is already `working` in this exact worktree.
+    /// An Orca/Conductor agent is already `working` in this exact worktree.
     pub live_session: bool,
 }
 
@@ -246,7 +246,7 @@ pub fn resolve_target(state: &Arc<AppState>, name: &str) -> Resolution {
         }
     }
 
-    let cat = conductor::catalog();
+    let cat = workspace::catalog();
 
     // Tier 0.5 — aliases, then re-enter the exact tiers under the canonical name.
     let mut needle = needle;
@@ -401,7 +401,7 @@ pub fn ask_which(en: bool, options: &[String]) -> String {
 /// A dead end is a wasted turn; naming real targets turns it into a menu, and
 /// it's how the user discovers their own repo list by voice.
 pub fn unknown_line(en: bool, needle: &str) -> String {
-    let names = conductor::launchable_names(3).join(", ");
+    let names = workspace::launchable_names(3).join(", ");
     match (en, names.is_empty()) {
         (true, true) => format!("I can't find \"{needle}\"."),
         (true, false) => format!("I can't find \"{needle}\". I have {names}…"),
@@ -530,21 +530,21 @@ mod tests {
         assert_eq!(newest(&wt).unwrap().name, "marseille");
     }
 
-    /// Hits the real Conductor DB — run explicitly with
+    /// Hits the real backend (Orca CLI or Conductor DB) — run explicitly with
     /// `cargo test -- --ignored --nocapture live_catalog`.
     #[test]
     #[ignore]
     fn live_catalog() {
-        let cat = conductor::catalog();
+        let cat = workspace::catalog();
         println!("{} launchable targets", cat.len());
         for c in &cat {
             println!("  {:9} {:24} repo={:22} live={} {}", c.kind, c.name, c.repo, c.live, c.path);
         }
-        assert!(!cat.is_empty(), "no targets — is Conductor installed?");
+        assert!(!cat.is_empty(), "no targets — is the backend installed and running?");
         assert!(
             cat.iter().all(|c| Path::new(&c.path).exists()),
             "every candidate path must exist"
         );
-        println!("\nlaunchable_names(24): {:?}", conductor::launchable_names(24));
+        println!("\nlaunchable_names(24): {:?}", workspace::launchable_names(24));
     }
 }

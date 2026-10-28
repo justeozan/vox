@@ -1,10 +1,14 @@
-//! Claude CLI agent subprocesses: launched by voice into any repo, tracked in a
-//! job registry, and — crucially — their ANSWER is captured.
+//! Agents launched by voice into any repo, tracked in a job registry.
 //!
-//! The agent runs as `claude --print --output-format stream-json --verbose`, so
-//! we get incremental assistant text (which survives a timeout kill) plus an
-//! explicit terminal envelope telling us whether it actually succeeded. That
-//! answer is what the announcement pipeline speaks.
+//! Two ways to run one, by `backend`:
+//!  * Conductor: a headless `claude --print --output-format stream-json
+//!    --verbose` subprocess. We get incremental assistant text (which survives a
+//!    timeout kill) plus an explicit terminal envelope telling us whether it
+//!    actually succeeded — and that ANSWER is what the announcement pipeline
+//!    speaks.
+//!  * Orca: `orca agent launch` opens the agent as a tab in Orca. Orca owns the
+//!    process, so there is no child to supervise here; the watcher announces the
+//!    answer when the agent finishes, exactly as for any agent the user started.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -16,6 +20,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
 use crate::targets::{Target, TargetSource};
+use crate::workspace::Backend;
 use crate::AppState;
 
 /// Each agent is a full Claude Code process (node runtime, MCP servers, file
@@ -85,6 +90,8 @@ pub struct AgentJob {
 #[derive(Debug)]
 pub enum LaunchError {
     NoCli,
+    /// Orca backend, but its CLI is missing or its runtime isn't answering.
+    NoOrca,
     BadCwd(String),
     TooMany(usize),
     Cancelled,
@@ -124,7 +131,7 @@ impl AgentOutcome {
     }
 }
 
-fn emit_agents(app: &AppHandle, state: &Arc<AppState>) {
+pub fn emit_agents(app: &AppHandle, state: &Arc<AppState>) {
     let jobs = state.agents.lock().unwrap();
     let list: Vec<Value> = jobs
         .iter()
@@ -138,9 +145,16 @@ fn emit_agents(app: &AppHandle, state: &Arc<AppState>) {
             })
         })
         .collect();
+    // With Orca, agents run outside Vox: the badge also counts what the watcher
+    // saw working there (Vox's own pending launches are in `list` already).
+    let in_orca = if crate::workspace::backend() == Backend::Orca {
+        state.orca_working.load(Ordering::SeqCst)
+    } else {
+        0
+    };
     // A SUPERSET of the old payload: the renderer only reads `count`, so this
     // stays backward compatible with an un-updated webview.
-    let _ = app.emit("agent-status", json!({ "count": list.len(), "agents": list }));
+    let _ = app.emit("agent-status", json!({ "count": list.len() + in_orca, "agents": list }));
 }
 
 fn set_phase(app: &AppHandle, state: &Arc<AppState>, id: u64, phase: AgentPhase) {
@@ -218,15 +232,89 @@ pub fn status_block(state: &Arc<AppState>, en: bool) -> String {
     out
 }
 
+/// Tool rules a voice-launched agent may never use, even though it runs with
+/// --dangerously-skip-permissions (nobody is there to approve a prompt in
+/// --print mode). A misheard command must not be able to publish, force-push or
+/// wipe anything. Deny rules still win over the skip flag — verified against the
+/// real CLI — so this is a hard stop, not a hint.
+const AGENT_DENIED_TOOLS: &[&str] = &[
+    "Bash(git push:*)",
+    "Bash(git reset --hard:*)",
+    "Bash(git clean:*)",
+    "Bash(git branch -D:*)",
+    "Bash(rm -rf:*)",
+    "Bash(rm -fr:*)",
+    "Bash(sudo:*)",
+    "Bash(gh pr merge:*)",
+    "Bash(gh release:*)",
+    "Bash(npm publish:*)",
+    "Bash(cargo publish:*)",
+];
+
 /// Agents already working in this exact directory.
 pub fn count_in(state: &Arc<AppState>, path: &str) -> usize {
-    state.agents.lock().unwrap().iter().filter(|j| j.path == path).count()
+    // Local jobs: Conductor's headless agents, or an Orca launch still drafting.
+    let local = state.agents.lock().unwrap().iter().filter(|j| j.path == path).count();
+    if crate::workspace::backend() == Backend::Orca {
+        let in_orca = crate::orca::ps().map(|w| crate::orca::working_in(&w, path)).unwrap_or(0);
+        return local + in_orca;
+    }
+    local
 }
 
-/// Stop every running agent. The hard undo — worth more than a confirmation
+/// Stop every agent Vox started. The hard undo — worth more than a confirmation
 /// prompt, because it also fixes mistakes a confirmation would never catch
 /// (right repo, wrong task).
 pub fn kill_all(app: &AppHandle, state: &Arc<AppState>) -> usize {
+    kill_local(app, state) + kill_orca(state)
+}
+
+/// Close the Orca tabs of agents Vox launched that are still busy.
+///
+/// Only those: a tab whose agent already finished holds output the user may
+/// still want to read, and agents the user started in Orca themselves are not
+/// Vox's to stop. The handle was recorded at launch; if Orca refuses the close
+/// (a chat-surface session may not be a closable terminal) we say so in the log
+/// rather than count it — it has to be stopped in Orca.
+fn kill_orca(state: &Arc<AppState>) -> usize {
+    // A tab from yesterday's session is not what "stop" means.
+    const RECORD_TTL: u64 = 6 * 3600;
+    let now = crate::now_unix();
+    let records: Vec<crate::orca::LaunchRecord> = {
+        let mut r = state.orca_launches.lock().unwrap();
+        r.retain(|l| now.saturating_sub(l.at) < RECORD_TTL);
+        r.clone()
+    };
+    if records.is_empty() {
+        return 0;
+    }
+    let Some(wts) = crate::orca::ps() else {
+        println!("[vox] stop: Orca isn't answering — stop the agents in Orca");
+        return 0;
+    };
+    let mut closed = 0;
+    for rec in records {
+        if crate::orca::working_in(&wts, &rec.path) == 0 {
+            continue;
+        }
+        match crate::orca::close_terminal(&rec.handle) {
+            Ok(()) => {
+                closed += 1;
+                state.orca_launches.lock().unwrap().retain(|l| l.handle != rec.handle);
+            }
+            Err(e) => println!(
+                "[vox] stop: couldn't close {} ({e}) — stop that agent in Orca",
+                rec.path
+            ),
+        }
+    }
+    closed
+}
+
+/// Kill the headless agents (Conductor path) and cancel launches still inside
+/// their window. This alone is what runs at app exit: quitting Vox must not
+/// close agents that live in Orca — they don't depend on it.
+pub fn kill_local(app: &AppHandle, state: &Arc<AppState>) -> usize {
     let jobs: Vec<AgentJob> = state.agents.lock().unwrap().clone();
     let mut killed = 0;
     for j in &jobs {
@@ -381,6 +469,9 @@ pub fn launch(
     target: &Target,
     task: &str,
 ) -> Result<AgentJob, LaunchError> {
+    if crate::workspace::backend() == Backend::Orca {
+        return launch_orca(app, state, target, task);
+    }
     let claude = state.paths.lock().unwrap().claude_cli.clone();
     let Some(claude) = claude else {
         return Err(LaunchError::NoCli);
@@ -435,6 +526,118 @@ pub fn launch(
     Ok(job)
 }
 
+/// Orca flavour of `launch`. Same promise — everything that can be checked is
+/// checked on the caller's thread, so a failure is speakable in the same breath —
+/// but the agent itself starts through the CLI instead of a child process.
+fn launch_orca(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    target: &Target,
+    task: &str,
+) -> Result<AgentJob, LaunchError> {
+    if !std::path::Path::new(&target.path).exists() {
+        return Err(LaunchError::BadCwd(target.label.clone()));
+    }
+    // One call both proves Orca is answering and feeds the cap: every agent
+    // working in Orca shares the rate limit and the laptop, whoever started it.
+    let working = crate::orca::ps()
+        .map(|w| crate::orca::working_count(&w))
+        .ok_or(LaunchError::NoOrca)?;
+
+    let id = {
+        let mut jobs = state.agents.lock().unwrap();
+        let cap = max_agents();
+        if working + jobs.len() >= cap {
+            return Err(LaunchError::TooMany(cap));
+        }
+        let id = state.agent_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        // Held only while the launch is pending (cancel window, prompt drafting,
+        // the CLI call): it keeps the badge honest and makes a burst of voice
+        // commands count against the cap before Orca can report them.
+        jobs.push(AgentJob {
+            id,
+            label: target.label.clone(),
+            repo: match &target.source {
+                TargetSource::Worktree { repo, .. } | TargetSource::RepoRoot { repo } => repo.clone(),
+                _ => target.label.clone(),
+            },
+            path: target.path.clone(),
+            task: task.to_string(),
+            phase: AgentPhase::Drafting,
+            started: Instant::now(),
+            pid: None,
+        });
+        id
+    };
+    emit_agents(app, state);
+
+    let job = state.agents.lock().unwrap().iter().find(|j| j.id == id).cloned();
+    let Some(job) = job else {
+        return Err(LaunchError::SpawnFailed("job vanished".into()));
+    };
+
+    let needs_window = target.source != TargetSource::Active;
+    let gen0 = state.interrupt_gen.load(Ordering::SeqCst);
+    let (app_c, state_c) = (app.clone(), state.clone());
+    let (path, task_s, label) = (target.path.clone(), task.to_string(), target.label.clone());
+    std::thread::spawn(move || {
+        supervise_orca(app_c, state_c, id, path, task_s, label, needs_window, gen0);
+    });
+
+    Ok(job)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn supervise_orca(
+    app: AppHandle,
+    state: Arc<AppState>,
+    id: u64,
+    path: String,
+    task: String,
+    label: String,
+    needs_window: bool,
+    gen0: u64,
+) {
+    if needs_window {
+        std::thread::sleep(CANCEL_WINDOW);
+        if state.interrupt_gen.load(Ordering::SeqCst) != gen0 {
+            println!("[vox] agent on {label} cancelled inside the launch window");
+            remove_job(&app, &state, id);
+            return;
+        }
+    }
+
+    let prompt = crate::llm::draft_prompt(&state, &label, &task);
+    set_phase(&app, &state, id, AgentPhase::Running);
+
+    match crate::orca::launch(&path, &prompt) {
+        Ok(l) => {
+            println!(
+                "[vox] orca agent {id} on {label} → {} {} (prompt: {})",
+                l.kind, l.handle, l.prompt_outcome
+            );
+            if let Some(w) = &l.warning {
+                println!("[vox] orca launch warning: {w}");
+            }
+            state.orca_launches.lock().unwrap().push(crate::orca::LaunchRecord {
+                handle: l.handle,
+                path: path.clone(),
+                at: crate::now_unix(),
+            });
+            // The same full-prompt echo the headless path emits: what Vox says is
+            // one short sentence, and this is the only place the brief is visible.
+            let _ = app.emit("delegation", json!({ "project": label, "path": path, "prompt": prompt }));
+            // Not `finish`: the agent is only starting. Orca owns it now, and the
+            // watcher speaks its answer when its state turns `done`.
+            remove_job(&app, &state, id);
+        }
+        Err(e) => {
+            eprintln!("[vox] orca agent launch failed: {e}");
+            finish(&app, &state, id, AgentOutcome::SpawnError { detail: e });
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn supervise(
     app: AppHandle,
@@ -475,9 +678,11 @@ fn supervise(
             "stream-json",
             "--verbose",
             "--dangerously-skip-permissions",
-            "--",
-            &prompt,
+            // Variadic: swallows every value up to the `--` below.
+            "--disallowedTools",
         ])
+        .args(AGENT_DENIED_TOOLS)
+        .args(["--", &prompt])
         .current_dir(&cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -591,7 +796,7 @@ fn finish(app: &AppHandle, state: &Arc<AppState>, id: u64, outcome: AgentOutcome
 
     let snippet = outcome
         .text()
-        .map(crate::conductor::clean_snippet)
+        .map(crate::workspace::clean_snippet)
         .unwrap_or_default();
     let _ = app.emit(
         "agent-finished",

@@ -11,20 +11,25 @@ pub mod brain;
 pub mod conductor;
 pub mod daemons;
 pub mod llm;
+pub mod logfile;
+pub mod orca;
 pub mod setup;
 pub mod speech;
 pub mod targets;
 pub mod watch;
+pub mod workspace;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindow, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 pub const BAR_W: f64 = 408.0;
@@ -58,6 +63,32 @@ pub struct Settings {
     /// (your subscription, via the CLI) | "anthropic" / "openai" (API key).
     #[serde(default = "default_provider")]
     pub provider: String,
+    /// Where workspaces and agents live: "orca" (its CLI; agents open as tabs in
+    /// Orca) | "conductor" (its SQLite DB; agents run headless).
+    #[serde(default = "default_backend")]
+    pub backend: String,
+}
+
+fn default_backend() -> String {
+    "orca".into()
+}
+pub const BACKENDS: &[&str] = &["orca", "conductor"];
+
+/// The backend, read straight from disk — same reasoning as `persisted_provider`:
+/// workspace lookups run where no AppState is at hand, and re-reading makes a
+/// settings change apply on the next turn.
+pub fn persisted_backend() -> String {
+    std::env::var("VOX_BACKEND")
+        .ok()
+        .or_else(|| {
+            std::fs::read_to_string(settings_path())
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| v.get("backend").and_then(|p| p.as_str()).map(String::from))
+        })
+        .map(|b| b.to_lowercase())
+        .filter(|b| BACKENDS.contains(&b.as_str()))
+        .unwrap_or_else(default_backend)
 }
 
 fn default_provider() -> String {
@@ -187,6 +218,7 @@ fn load_settings() -> Settings {
     } else {
         default_provider()
     };
+    let backend = persisted_backend();
     // Keep the two in step at LOAD time, not just when the dropdown changes:
     // VOX_PROVIDER (or a hand-edited settings.json) can set the provider
     // without touching the model, leaving "Claude (subscription)" sitting next
@@ -200,7 +232,7 @@ fn load_settings() -> Settings {
         }
         d
     };
-    Settings { model, language, agent_reply, agent_reply_max_chars, tts_engine, provider }
+    Settings { model, language, agent_reply, agent_reply_max_chars, tts_engine, provider, backend }
 }
 
 fn save_settings(s: &Settings) {
@@ -304,8 +336,15 @@ pub struct AppState {
     /// Unix seconds of the last spoken "I could do X next" offer.
     pub last_proposal_at: AtomicU64,
     /// (cwd, unix) for agents Vox launched recently. Guards against announcing
-    /// the same work twice should a Conductor bridge ever exist.
+    /// the same work twice should a Conductor bridge ever exist. (Conductor
+    /// backend only: an Orca agent lives in Orca, so the watcher is the one voice.)
     pub vox_cwds: Mutex<Vec<(String, u64)>>,
+    /// Agents Vox started inside Orca (newest last), so "stop" can close their
+    /// tabs. Orca owns the process; this only remembers how to reach it.
+    pub orca_launches: Mutex<Vec<orca::LaunchRecord>>,
+    /// Agents working in Orca right now (any origin), refreshed by the watcher.
+    /// Only feeds the pill's badge.
+    pub orca_working: AtomicUsize,
 }
 
 // Renderer pill states, mirrored into `AppState::ui_busy`. Kept in sync with
@@ -565,6 +604,13 @@ async fn set_settings(
                     settings.model = brain::default_model(&settings.provider).to_string();
                 }
             }
+            // No restart: every workspace lookup re-reads it.
+            if let Some(b) = next.get("backend").and_then(|v| v.as_str()) {
+                let b = b.to_lowercase();
+                if BACKENDS.contains(&b.as_str()) {
+                    settings.backend = b;
+                }
+            }
             if let Some(e) = next.get("tts_engine").and_then(|v| v.as_str()) {
                 let e = e.to_lowercase();
                 if TTS_ENGINES.contains(&e.as_str()) && e != settings.tts_engine {
@@ -609,6 +655,7 @@ async fn set_settings(
             "language": s.language,
             "agent_reply": s.agent_reply,
             "agent_reply_max_chars": s.agent_reply_max_chars,
+            "backend": s.backend,
             "restarted": restart,
         }))
     })
@@ -820,7 +867,7 @@ fn replay_recap(app: AppHandle, state: tauri::State<'_, Arc<AppState>>) {
     let st = state.inner().clone();
     std::thread::spawn(move || {
         st.startup_brief_done.store(false, Ordering::SeqCst);
-        if !conductor::speak_startup_brief(&app, &st) {
+        if !workspace::speak_startup_brief(&app, &st) {
             // A button press deserves a reply even when there's nothing.
             let en = st.settings.lock().unwrap().language == "en";
             speech::speak(
@@ -923,9 +970,143 @@ pub fn load_pronunciations() -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+// ── Mac-app chrome: menu bar, tray, show/hide ────────────────────────────────
+
+/// What ⌘, used to do as a global shortcut. Now driven by the app menu and the
+/// tray, so it no longer steals Preferences from every other app.
+fn toggle_settings(app: &AppHandle) {
+    let _ = app.emit("toggle-settings", ());
+}
+
+/// Bring the pill back. `pill-shown` replays the entrance animation, which only
+/// fires once the window is actually visible (see the startup re-show).
+fn show_pill(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.emit("pill-shown", ());
+    }
+}
+
+/// Hide, never destroy: the pill is the whole app, and a windowless-but-running
+/// Vox would have no way back except the global shortcut.
+fn hide_pill(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
+}
+
+fn toggle_pill(app: &AppHandle) {
+    match app.get_webview_window("main").and_then(|w| w.is_visible().ok()) {
+        Some(true) => hide_pill(app),
+        _ => show_pill(app),
+    }
+}
+
+/// Native menu bar. Without it an app has no ⌘Q / ⌘W / ⌘C and text fields in
+/// settings lose copy-paste (the Edit items are what route those key
+/// equivalents to the webview).
+fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let settings = MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
+    let app_menu = Submenu::with_items(
+        app,
+        "Vox",
+        true,
+        &[
+            &PredefinedMenuItem::about(app, Some("About Vox"), None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &settings,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::show_all(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::quit(app, None)?,
+        ],
+    )?;
+    let edit_menu = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    let window_menu = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &MenuItem::with_id(app, "close-pill", "Close", true, Some("CmdOrCtrl+W"))?,
+            &MenuItem::with_id(app, "show-pill", "Show Vox", true, None::<&str>)?,
+        ],
+    )?;
+    Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu])
+}
+
+/// Menu-bar icon: the way back to a hidden pill, and a Quit that is always
+/// reachable. Menu clicks are handled by the app-wide `on_menu_event`.
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let menu = Menu::with_items(
+        app,
+        &[
+            &MenuItem::with_id(app, "tray-toggle", "Show / Hide Vox", true, None::<&str>)?,
+            &MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "tray-quit", "Quit Vox", true, None::<&str>)?,
+        ],
+    )?;
+    let mut tray = TrayIconBuilder::new().menu(&menu);
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
+fn on_menu_event(app: &AppHandle, id: &str) {
+    match id {
+        "settings" => {
+            // Settings render inside the pill, so it has to be on screen.
+            show_pill(app);
+            toggle_settings(app);
+        }
+        "close-pill" => hide_pill(app),
+        "show-pill" => show_pill(app),
+        "tray-toggle" => toggle_pill(app),
+        "tray-quit" => app.exit(0),
+        _ => {}
+    }
+}
+
+/// Runs on every way out (⌘Q, tray Quit, Dock Quit). Exiting the process does
+/// not run Drop on managed state, so without this the Python speech daemons
+/// and any running agents would be orphaned.
+fn shutdown(app: &AppHandle, state: &Arc<AppState>) {
+    // Local only: agents running in Orca outlive Vox and must not be closed by it.
+    agents::kill_local(app, state);
+    if let Ok(mut g) = state.stt.lock() {
+        if let Some(mut d) = g.take() {
+            d.kill();
+        }
+    }
+    if let Ok(mut g) = state.tts.lock() {
+        if let Some(mut d) = g.take() {
+            d.kill();
+        }
+    }
+}
+
 // ── App entry ────────────────────────────────────────────────────────────────
 
 pub fn run() {
+    // First thing, so even startup failures land in the log.
+    logfile::init();
     let settings = load_settings();
     // Write back immediately. load_settings repairs an incoherent
     // provider/model pair and fills in fields absent from an older file; without
@@ -966,10 +1147,12 @@ pub fn run() {
         announce_q: Arc::new((Mutex::new(announce::Queue::default()), Condvar::new())),
         last_proposal_at: AtomicU64::new(0),
         vox_cwds: Mutex::new(Vec::new()),
+        orca_launches: Mutex::new(Vec::new()),
+        orca_working: AtomicUsize::new(0),
     });
 
     let alt_space = Shortcut::new(Some(Modifiers::ALT), Code::Space);
-    let cmd_comma = Shortcut::new(Some(Modifiers::SUPER), Code::Comma);
+    let exit_state = state.clone();
 
     tauri::Builder::default()
         .plugin(
@@ -980,13 +1163,19 @@ pub fn run() {
                     }
                     if shortcut == &alt_space {
                         let _ = app.emit("toggle-listening", ());
-                    } else if shortcut == &cmd_comma {
-                        let _ = app.emit("toggle-settings", ());
                     }
                 })
                 .build(),
         )
         .manage(state.clone())
+        .on_menu_event(|app, event| on_menu_event(app, event.id().as_ref()))
+        .on_window_event(|window, event| {
+            // ⌘W / the red button must never destroy the only window.
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_settings,
             set_settings,
@@ -1018,9 +1207,21 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             request_microphone_access();
 
-            // Floating accessory — no dock icon, follows every Space.
+            // A real Mac app: Dock icon, ⌘Tab entry, menu bar (⌘Q / ⌘W). The
+            // pill still floats over every Space — that comes from the
+            // non-activating NSPanel below, not from the activation policy.
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            app.set_activation_policy(tauri::ActivationPolicy::Regular);
+
+            match build_menu(app.handle()) {
+                Ok(menu) => {
+                    let _ = app.set_menu(menu);
+                }
+                Err(e) => eprintln!("[vox] menu failed: {e}"),
+            }
+            if let Err(e) = build_tray(app.handle()) {
+                eprintln!("[vox] tray icon failed: {e}");
+            }
 
             let window = app.get_webview_window("main").expect("main window");
             let _ = window.set_visible_on_all_workspaces(true);
@@ -1064,7 +1265,7 @@ pub fn run() {
                     // keep the plain window rather than crash.
                     if let Some(panel_cls) = objc2::runtime::AnyClass::get(c"NSPanel") {
                         objc2::ffi::object_setClass(
-                            ns_win as *mut objc2::runtime::AnyObject as *mut _,
+                            ns_win as *mut _,
                             panel_cls as *const _ as *mut _,
                         );
                         // NSWindowStyleMaskNonactivatingPanel (1<<7) is only
@@ -1190,9 +1391,6 @@ pub fn run() {
 
             if let Err(e) = app.global_shortcut().register(alt_space) {
                 eprintln!("[vox] failed to register Alt+Space: {e}");
-            }
-            if let Err(e) = app.global_shortcut().register(cmd_comma) {
-                eprintln!("[vox] failed to register Cmd+,: {e}");
             }
 
             #[cfg(debug_assertions)]
@@ -1329,12 +1527,19 @@ pub fn run() {
                 } else {
                     daemons::start_stt(&st);
                     daemons::start_tts(&st, handle.clone());
-                    println!("[vox] ready — Option+Space to activate, Cmd+, for settings");
+                    println!("[vox] ready — Option+Space to activate, Cmd+, (menu) for settings");
                 }
             });
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running vox");
+        .build(tauri::generate_context!())
+        .expect("error while building vox")
+        .run(move |app, event| match event {
+            // Dock icon clicked while the pill is hidden.
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => show_pill(app),
+            RunEvent::Exit => shutdown(app, &exit_state),
+            _ => {}
+        });
 }

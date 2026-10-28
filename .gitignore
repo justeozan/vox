@@ -4,3 +4,4 @@ test
 src-tauri/target/
 scripts/icon-src.png
 __pycache__/
+pnpm-lock.yaml

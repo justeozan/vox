@@ -355,13 +355,14 @@ fn amend_line(en: bool, target: &crate::targets::Target, already: usize, args: &
             format!("C'est parti, ça fait {n} agents sur {label}.")
         });
     }
-    // A headless agent editing files under a live Conductor session is the one
-    // genuinely surprising collision. Don't block it — just say it.
+    // A second agent editing files under a live session is the one genuinely
+    // surprising collision. Don't block it — just say it.
     if target.live_session {
+        let app = crate::workspace::backend().label();
         return Some(if en {
-            format!("A Conductor agent is already working on {label} — launching anyway.")
+            format!("An {app} agent is already working on {label} — launching anyway.")
         } else {
-            format!("L'agent Conductor bosse déjà sur {label}, je lance quand même.")
+            format!("L'agent {app} bosse déjà sur {label}, je lance quand même.")
         });
     }
     if let TargetSource::RepoRoot { .. } = target.source {
@@ -389,6 +390,8 @@ fn launch_error_line(en: bool, e: &crate::agents::LaunchError, label: &str) -> S
     match (e, en) {
         (E::NoCli, true) => "Claude Code isn't installed — I can't launch agents.".into(),
         (E::NoCli, false) => "Claude Code n'est pas installé, je ne peux pas lancer d'agent.".into(),
+        (E::NoOrca, true) => "I can't reach Orca — is it running?".into(),
+        (E::NoOrca, false) => "Je n'arrive pas à joindre Orca, il est lancé ?".into(),
         (E::BadCwd(l), true) => format!("{l}'s folder is gone."),
         (E::BadCwd(l), false) => format!("Le dossier de {l} n'existe plus."),
         // Refuse, never queue: a voice "ok" followed by ten minutes of nothing
@@ -496,33 +499,34 @@ pub fn draft_prompt(state: &Arc<AppState>, target_label: &str, task: &str) -> St
     // The scaffolding is assembled in Rust and is ALWAYS present, whatever the
     // model does — including the closing instruction, which is what makes the
     // agent produce an answer worth reading aloud.
-    let ctx = if quoted.is_empty() {
-        String::new()
-    } else if en {
-        format!("\n\nContext from a voice conversation (may be partial — verify against the repo):\n{quoted}")
-    } else {
-        format!("\n\nContexte issu d'une conversation vocale (possiblement partiel — vérifie dans le repo) :\n{quoted}")
-    };
-
+    // The user's own words lead and are authoritative. A small model's
+    // paraphrase can invent files or goals (seen live: a "reply OK" request
+    // drafted into "write a deployment checklist for vox.js"), so the agent is
+    // told to side with the transcript whenever the two disagree.
+    let said = if quoted.is_empty() { format!("  \"{task}\"") } else { quoted };
     if en {
         format!(
-            "{drafted}{ctx}\n\n\
+            "The user's exact request (voice transcript — this is the reference):\n{said}\n\n\
+             Rephrased brief (may be wrong — if it contradicts or adds to the request above, follow \
+             the request):\n{drafted}\n\n\
              Constraints: work only in this repository. Make the smallest change that satisfies \
-             the request. Run the project's existing tests if there are any. Do not commit or push \
-             unless explicitly asked.\n\n\
-             Done when: the change is implemented and the repo builds / tests pass.\n\
-             End your final message with a one-sentence summary of what you changed, written to be \
-             read aloud."
+             the request. If the request is a question or doesn't ask for a change, answer it without \
+             modifying any file. Run the project's existing tests if you changed code. Do not commit \
+             or push unless explicitly asked.\n\n\
+             End your final message with a one-sentence summary of what you did or found, written to \
+             be read aloud."
         )
     } else {
         format!(
-            "{drafted}{ctx}\n\n\
+            "Demande exacte de l'utilisateur (transcription vocale — c'est la référence) :\n{said}\n\n\
+             Reformulation (peut être fausse — si elle contredit ou ajoute à la demande ci-dessus, \
+             suis la demande) :\n{drafted}\n\n\
              Contraintes : travaille uniquement dans ce dépôt. Fais le plus petit changement qui \
-             satisfait la demande. Lance les tests existants s'il y en a. Ne commit ni ne push sans \
-             demande explicite.\n\n\
-             Terminé quand : le changement est implémenté et le repo build / les tests passent.\n\
-             Termine ton message final par une phrase unique résumant ce que tu as changé, écrite \
-             pour être lue à voix haute."
+             satisfait la demande. Si la demande est une question ou ne demande aucun changement, \
+             réponds sans modifier de fichier. Lance les tests existants si tu as changé du code. Ne \
+             commit ni ne push sans demande explicite.\n\n\
+             Termine ton message final par une phrase unique résumant ce que tu as fait ou trouvé, \
+             écrite pour être lue à voix haute."
         )
     }
 }
@@ -540,11 +544,12 @@ fn build_system(state: &Arc<AppState>) -> String {
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or(active);
 
-    // Rich per-workspace state from the Conductor DB. Language-aware
+    // Rich per-workspace state from Orca / the Conductor DB. Language-aware
     // descriptors so the model doesn't drift into French in English mode.
     // Six, not ten: this block is the expensive part of the prompt and it now
     // shares room with the launchable-target list. The recap path keeps 10.
-    let ws = crate::conductor::read_state(6);
+    let app_name = crate::workspace::backend().label();
+    let ws = crate::workspace::read_state(6);
     let mut workspace_context = String::new();
     if !ws.is_empty() {
         let lines = ws
@@ -555,7 +560,7 @@ fn build_system(state: &Arc<AppState>) -> String {
                     let preview = s
                         .preview
                         .as_deref()
-                        .map(crate::conductor::clean_snippet)
+                        .map(crate::workspace::clean_snippet)
                         .unwrap_or_else(|| (if en { "(nothing new)" } else { "(rien de neuf)" }).into());
                     let st = match s.status.as_str() {
                         "working" => if en { "agent working".into() } else { "agent en cours".into() },
@@ -582,9 +587,9 @@ fn build_system(state: &Arc<AppState>) -> String {
             .collect::<Vec<_>>()
             .join("\n");
         let heading = if en {
-            "\n\nCurrent Conductor worktree state (use ONLY this data to answer project questions):"
+            format!("\n\nCurrent {app_name} worktree state (use ONLY this data to answer project questions):")
         } else {
-            "\n\nÉtat de tes worktrees Conductor (utilise UNIQUEMENT ces données pour répondre aux questions sur un projet) :"
+            format!("\n\nÉtat de tes worktrees {app_name} (utilise UNIQUEMENT ces données pour répondre aux questions sur un projet) :")
         };
         workspace_context = format!("{heading}\n{lines}");
     }
@@ -592,7 +597,7 @@ fn build_system(state: &Arc<AppState>) -> String {
     // Names the model may TARGET. The state block above only carries
     // in-progress worktrees, so without this the model is forbidden (by the
     // "never invent a project" rule) from aiming at most of the user's repos.
-    let names = crate::conductor::launchable_names(24);
+    let names = crate::workspace::launchable_names(24);
     let catalog_block = if names.is_empty() {
         String::new()
     } else {
@@ -612,7 +617,7 @@ fn build_system(state: &Arc<AppState>) -> String {
 
     if en {
         format!(
-            "You are Vox, a voice AI assistant for a developer running many Conductor worktrees in parallel.\n\
+            "You are Vox, a voice AI assistant for a developer running many {app_name} worktrees in parallel.\n\
              ABSOLUTE RULES:\n\
              - Reply in ENGLISH ONLY, never in French — even if the context data below is in French\n\
              - Maximum 1 short sentence (15 words max), always\n\
@@ -627,7 +632,7 @@ fn build_system(state: &Arc<AppState>) -> String {
         )
     } else {
         format!(
-            "Tu es Vox, assistant vocal d'un développeur qui gère plusieurs worktrees Conductor en parallèle.\n\
+            "Tu es Vox, assistant vocal d'un développeur qui gère plusieurs worktrees {app_name} en parallèle.\n\
              RÈGLES ABSOLUES :\n\
              - Toujours en français, jamais en anglais\n\
              - Maximum 1 phrase courte (15 mots max)\n\

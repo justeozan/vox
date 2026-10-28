@@ -696,6 +696,13 @@
         <button data-reply="verbatim">MOT POUR MOT</button>
       </div>
     </div>
+    <div class="setting-row">
+      <div class="setting-label" id="lbl-backend">Backend</div>
+      <div class="segment" id="backend-segment">
+        <button data-backend="orca">ORCA</button>
+        <button data-backend="conductor">CONDUCTOR</button>
+      </div>
+    </div>
     <div class="setting-row" id="row-tts-engine" style="display:none">
       <div class="setting-label" id="lbl-tts-engine">Voix</div>
       <select id="tts-engine-select" class="setting-select"></select>
@@ -776,7 +783,7 @@ const SPEECH_SNR         = 2.2
 // for the least information: nothing about the pill's meaning changes when the
 // cursor arrives. The gear buttons now reveal inside this width.
 const SIZE_BASE     = [408, 56]
-const SIZE_SETTINGS = [500, 437]  // 6 rows × ~41px + header/padding
+const SIZE_SETTINGS = [500, 478]  // 7 rows × ~41px + header/padding
 const SETTINGS_ROW_H = 41         // 10px padding ×2 + 40px min-height + 1px border
 const SIZE_SETUP    = [520, 470]
 
@@ -807,6 +814,7 @@ const LABEL_TABLE = {
     provCodexCli: 'Codex (abonnement)', provAnthropic: 'Claude (clé API)',
     provOpenai: 'OpenAI (clé API)',
     agentReply: 'Réponse d\'agent', replySummary: 'RÉSUMÉ', replyVerbatim: 'MOT POUR MOT',
+    backend: 'Backend', backendHint: 'Orca : agents ouverts comme onglets. Conductor : agents en arrière-plan. Pris en compte tout de suite, sans redémarrage.',
     ttsEngine: 'Voix', engAuto: 'Automatique', engKokoro: 'Kokoro', engPiper: 'Piper',
     engQwen: 'Qwen3 (test)', engSay: 'macOS (say)',
     check: 'Vérifier', checking: '…', upToDate: 'À jour', download: 'Télécharger',
@@ -824,6 +832,7 @@ const LABEL_TABLE = {
     provCodexCli: 'Codex (subscription)', provAnthropic: 'Claude (API key)',
     provOpenai: 'OpenAI (API key)',
     agentReply: 'Agent reply', replySummary: 'SUMMARY', replyVerbatim: 'VERBATIM',
+    backend: 'Backend', backendHint: 'Orca: agents open as tabs. Conductor: agents run in the background. Applies immediately, no restart.',
     ttsEngine: 'Voice', engAuto: 'Automatic', engKokoro: 'Kokoro', engPiper: 'Piper',
     engQwen: 'Qwen3 (test)', engSay: 'macOS (say)',
     check: 'Check', checking: '…', upToDate: 'Up to date', download: 'Download',
@@ -1600,6 +1609,7 @@ document.getElementById('setup-repair-btn').addEventListener('click', async () =
 const modelSelect = document.getElementById('model-select')
 const langSegment = document.getElementById('lang-segment')
 const agentReplySegment = document.getElementById('agent-reply-segment')
+const backendSegment = document.getElementById('backend-segment')
 const providerSelect = document.getElementById('provider-select')
 const PROVIDERS = ['ollama', 'claude-cli', 'codex-cli', 'anthropic', 'openai']
 const PROVIDER_LABEL = {
@@ -1652,6 +1662,8 @@ function applyUiLang() {
   document.getElementById('lbl-update').textContent = labels.update
   document.getElementById('lbl-agent-reply').textContent = labels.agentReply
   document.getElementById('lbl-provider').textContent = labels.provider
+  document.getElementById('lbl-backend').textContent = labels.backend
+  backendSegment.title = labels.backendHint
   document.getElementById('lbl-tts-engine').textContent = labels.ttsEngine
   renderEngineOptions()
   for (const b of agentReplySegment.querySelectorAll('button')) {
@@ -1727,6 +1739,9 @@ async function openSettings() {
   }
   for (const btn of agentReplySegment.querySelectorAll('button')) {
     btn.classList.toggle('on', btn.dataset.reply === (current.agent_reply || 'summary'))
+  }
+  for (const btn of backendSegment.querySelectorAll('button')) {
+    btn.classList.toggle('on', btn.dataset.backend === (current.backend || 'orca'))
   }
 
   // Only offer the picker once there is something to pick: until Qwen is
@@ -1827,6 +1842,15 @@ agentReplySegment.addEventListener('click', (e) => {
   if (!btn) return
   for (const b of agentReplySegment.querySelectorAll('button')) b.classList.toggle('on', b === btn)
   invoke('set_settings', { next: { agent_reply: btn.dataset.reply } })
+})
+
+// No restart: every workspace lookup re-reads it, so the next turn (and the
+// next watcher tick) already uses the new backend.
+backendSegment.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-backend]')
+  if (!btn) return
+  for (const b of backendSegment.querySelectorAll('button')) b.classList.toggle('on', b === btn)
+  invoke('set_settings', { next: { backend: btn.dataset.backend } })
 })
 
 langSegment.addEventListener('click', (e) => {
