@@ -240,8 +240,10 @@ pub fn init_paths(state: &Arc<AppState>, app: &AppHandle) {
         None => eprintln!("[vox] whisper not found — STT CLI fallback unavailable"),
     }
 
-    // STT python: prefer the interpreter next to the whisper CLI (same env).
-    let mut stt_candidates: Vec<PathBuf> = Vec::new();
+    // STT python: the ~/.vox/venv first — it is what first-run setup installs
+    // and keeps current. A system Python that happens to have whisper (often an
+    // old 3.9 user-site install) is only a fallback.
+    let mut stt_candidates: Vec<PathBuf> = vec![h.join(".vox/venv/bin/python")];
     if let Some(w) = &whisper_cli {
         if let Some(dir) = w.parent() {
             stt_candidates.push(dir.join("python3.9"));
@@ -253,7 +255,6 @@ pub fn init_paths(state: &Arc<AppState>, app: &AppHandle) {
             stt_candidates.push(p);
         }
     }
-    stt_candidates.push(h.join(".vox/venv/bin/python"));
     let stt_python = python_with_module(&stt_candidates, "whisper");
     match &stt_python {
         Some(p) => println!("[vox] stt python: {}", p.display()),
@@ -343,7 +344,7 @@ fn start_tts_engine(state: &Arc<AppState>, app: AppHandle, engine: &'static str)
         let app = app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(800));
-            crate::conductor::speak_startup_brief(&app, &st);
+            crate::workspace::speak_startup_brief(&app, &st);
         });
     });
 

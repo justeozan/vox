@@ -1,6 +1,6 @@
 # Vox
 
-A floating voice pill for macOS that lets you talk to your [Conductor](https://conductor.build) worktrees instead of alt-tabbing between them.
+A floating voice pill for macOS that lets you talk to your [Orca](https://github.com/stablyai/orca) or [Conductor](https://conductor.build) worktrees instead of alt-tabbing between them.
 
 <p align="center">
   <img src="docs/vox-loop.gif" alt="Vox: launch an agent by voice, then hear its answer" width="720">
@@ -19,7 +19,7 @@ Vox sits at the bottom of your screen as a small always-on-top bar. Hit **Option
 
 The loop it closes:
 
-> **Launch** — *"lance un agent sur findy pour corriger les tests"* — and it goes, on any repo Conductor knows about.
+> **Launch** — *"lance un agent sur findy pour corriger les tests"* — and it goes, on any repo Orca (or Conductor) knows about.
 > **Follow** — *"où en sont mes agents ?"* — answered from what is actually running, with elapsed time.
 > **Hear back** — when an agent answers, Vox tells you out loud, summarized or word for word.
 > **Ask** — *"il a dit quoi ?"* — the result stays answerable for half an hour.
@@ -30,12 +30,12 @@ Everything runs on your machine. No cloud calls, no API keys.
 
 ## Features
 
-- **Voice orchestrator, not a chatbot.** Vox reads Conductor's SQLite database (read-only) to know every worktree's agent, status, and last message, and uses that as grounding for every answer — it's told never to invent a project, PR, or bug that isn't in the data. Repos you've hidden in Conductor are ignored everywhere (recap, carousel, voice targeting).
+- **Voice orchestrator, not a chatbot.** Vox reads Orca's CLI (or Conductor's SQLite database, read-only) to know every worktree's agent, status, and last message, and uses that as grounding for every answer — it's told never to invent a project, PR, or bug that isn't in the data. Repos you've hidden in Conductor (or archived worktrees in Orca) are ignored everywhere (recap, carousel, voice targeting).
 - **Startup recap with a live carousel.** On launch, once the local TTS model is warm, Vox speaks a one-sentence status for each in-progress worktree (agent still working / errored / waiting on you / done and ready to test) while the pill expands into a vertical carousel of worktree cards that scrolls to whichever one is being discussed. Quiet worktrees are grouped into a single line instead of repeated one by one, phrasing rotates between runs, and the recap closes with an LLM recommendation grounded in each worktree's *original ask* — including a proposed follow-up prompt when an agent's result looks done. Option+Space skips it, and a recap button (revealed on hover, next to the gear) replays it anytime.
 - **Live transcript.** What Vox says appears sentence-by-sentence as it's spoken, and the last sentence — usually the recommendation — stays readable after the voice stops.
 - **Streaming replies.** Speech starts on the first complete sentence while the local LLM is still generating the rest — sentence N+1 is synthesized while sentence N plays.
 - **Launch an agent on any repo, as many as you want.** One `launch_agent` command targets a repo name, a worktree codename, or `"here"` for the active project — every repo Conductor knows about, not just the ones with work in progress. Names are matched exactly first, then fuzzily (so a mangled transcription still lands), and a name that matches two repos equally is a spoken question rather than a coin flip. Up to four agents run at once; ⌥Space within two seconds of a launch cancels it, and "stop" kills them all.
-- **Vox tells you when an agent finishes.** As soon as an agent produces an answer — one Vox launched, or one you started inside Conductor — it speaks it: a one-sentence summary, or the answer read out verbatim, depending on a setting (long answers fall back to a summary automatically). Announcements wait for silence, never interrupt you, survive an ⌥Space (they come back rather than being lost), and the result stays in memory so you can ask "what did it say?" afterwards.
+- **Vox tells you when an agent finishes.** As soon as an agent produces an answer — one Vox launched, or one you started inside Orca or Conductor — it speaks it: a one-sentence summary, or the answer read out verbatim, depending on a setting (long answers fall back to a summary automatically). Announcements wait for silence, never interrupt you, survive an ⌥Space (they come back rather than being lost), and the result stays in memory so you can ask "what did it say?" afterwards.
 - **Local by default, your choice otherwise.** Speech-to-text via a resident Whisper (`openai-whisper`) daemon; text-to-speech via Kokoro (English) or Piper (French), with macOS `say` as a last-resort fallback. The brain — the model that turns your voice into an action — is a picker: any model pulled in Ollama (default `qwen2.5:3b`, fastest), your **Claude or Codex subscription** through their CLI with no API key, or the Anthropic / OpenAI APIs. A subscription CLI understands more but takes seconds rather than under one; the trade-off is yours.
 - **Bilingual, fully switchable.** French and English each get their own STT language hint, system prompt, and TTS voice. Flipping the toggle in settings restarts the speech daemons and clears the conversation so the model doesn't carry over the wrong language.
 - **Native macOS pill.** Real-time desktop blur clipped to the pill's rounded corners (`window-vibrancy` + `NSVisualEffectView`), floats above fullscreen apps and every Space, animated waveform per state, and a per-letter transcript reveal so you can see what Vox heard.
@@ -48,8 +48,8 @@ Everything runs on your machine. No cloud calls, no API keys.
 - macOS 12 (Monterey) or later — built for Apple Silicon.
 - [Ollama](https://ollama.com) installed and running, with at least one model pulled.
 - Python 3.11+ (used once to create `~/.vox/venv`; the speech stack installs itself into it, isolated from your system Python).
-- [Conductor](https://conductor.build) if you want the worktree recap and voice-launched agents — Vox still runs without it, it just has nothing to recap.
-- The [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) (`claude`) on your `PATH` if you want Vox to launch agents by voice.
+- [Orca](https://github.com/stablyai/orca) (default) *or* [Conductor](https://conductor.build) if you want the worktree recap and voice-launched agents — pick one with the `backend` setting. Vox still runs without either, it just has nothing to recap.
+- The [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) (`claude`) on your `PATH` if you want Vox to launch agents by voice with Conductor (with Orca, the agent starts inside Orca itself).
 
 ## Install
 
@@ -103,9 +103,11 @@ All config lives under `~/.vox/`:
     "language": "en",
     "agent_reply": "summary",
     "agent_reply_max_chars": 420,
-    "tts_engine": "auto"
+    "tts_engine": "auto",
+    "backend": "orca"
   }
   ```
+  `backend` is `orca` (default) or `conductor`: where Vox reads your worktrees and agents from, and where voice-launched agents run. It's also a selector in the settings panel and applies on the next turn, no restart.
   `agent_reply` is `summary` (default), `verbatim`, or `off` — `off` still remembers results and still answers questions about them, it just never speaks unprompted. Verbatim switches to a summary past `agent_reply_max_chars` of cleaned text (~30 seconds of speech). `tts_engine` is `auto` (Kokoro for English, Piper for French) or an explicit `kokoro` / `piper` / `qwen3` / `say`.
 - **`projects.json`** — project name → filesystem path, used by the "switch project" voice command. Auto-created on first launch with the folder Vox was started from.
   ```json
@@ -121,11 +123,13 @@ All config lives under `~/.vox/`:
   { "orie vo": "orivo" }
   ```
 
-Advanced: environment variables override the persisted settings at launch, mainly useful for development — `VOX_MODEL`, `VOX_LANG`, `VOX_PROJECT`, `VOX_TTS`, `VOX_SAY_VOICE`, `VOX_AGENT_TIMEOUT`, `VOX_AGENT_REPLY`, plus:
+Advanced: environment variables override the persisted settings at launch, mainly useful for development — `VOX_MODEL`, `VOX_LANG`, `VOX_PROJECT`, `VOX_TTS`, `VOX_SAY_VOICE`, `VOX_AGENT_TIMEOUT` (Conductor agents only), `VOX_AGENT_REPLY`, `VOX_BACKEND`, plus:
 
 - `VOX_MAX_AGENTS` (default 4) — simultaneous agents. Each one is a full Claude Code process and they share a rate limit; past four a laptop also running Ollama and a speech model starts to crawl. Over the cap Vox refuses out loud rather than queueing silently.
 - `VOX_DRAFT_MODEL` — a second local model used only to expand a spoken request into a full agent prompt. It runs *after* the spoken confirmation, so a bigger model's latency is invisible. Defaults to the main model.
 - `VOX_DEBUG_SAY="…"` — drive one full turn at startup without a microphone. The mic needs a signed bundle, so this is the way to exercise the loop from `npm run tauri dev`.
+
+Logs live in `~/Library/Logs/Vox/vox.log` (rotated at 5 MB, one `vox.log.1` kept) when Vox is launched from Finder or the Dock; from a terminal they go to the terminal.
 
 Two agents in the same worktree is allowed (Vox says "that's two agents on findy now") but they can conflict on files — it's the same situation as two terminals in one directory.
 
@@ -135,10 +139,12 @@ Vox is a [Tauri 2](https://v2.tauri.app) app: a Rust backend (`src-tauri/`) driv
 
 - **Speech in** — the renderer runs local voice-activity detection on the mic stream, encodes a 16kHz mono WAV, and sends it to Rust.
 - **STT** — Rust hands the WAV to a long-lived Python daemon (`src-tauri/resources/vox_stt.py`) that keeps an `openai-whisper` model resident in memory and talks over a line-based stdin/stdout protocol; it falls back to the `whisper` CLI if the daemon isn't available.
-- **Brain** — the transcript, plus a fresh read of your Conductor worktree state (including each session's original ask), go to Ollama's OpenAI-compatible endpoint as a streamed request with three function-call tools (`launch_agent`, `prompt_worktree`, `switch_project`). Models without native tool-calling get a JSON-object prompt fallback.
+- **Brain** — the transcript, plus a fresh read of your Orca (or Conductor) worktree state (including each session's original ask), go to Ollama's OpenAI-compatible endpoint as a streamed request with three function-call tools (`launch_agent`, `prompt_worktree`, `switch_project`). Models without native tool-calling get a JSON-object prompt fallback.
 - **TTS** — reply sentences are queued into a resident Kokoro (English) or Piper (French) daemon (`vox_tts.py` / `vox_tts_piper.py`) as the LLM generates them — or macOS `say` if neither is available. The renderer plays each WAV; synthesis runs one sentence ahead of playback.
-- **Conductor state** — read-only, via the system `sqlite3` CLI against Conductor's own database (`~/Library/Application Support/com.conductor.app/conductor.db`). Vox never writes to it.
-- **Agents** — voice-launched tasks run as `claude --print --dangerously-skip-permissions "<task>"` in the target worktree (the active project, or any worktree resolved by name from Conductor's database), with a 10-minute default timeout (`VOX_AGENT_TIMEOUT`) and a live agent-count badge on the pill.
+- **Orca state** (default backend) — through the `orca` CLI with `--json`: `worktree ps` gives every worktree's agents (state, original prompt, last answer) and `repo list` adds repos with no activity, so any repo is a launch target. Calls are time-boxed (5 s); if Orca isn't running, Vox behaves as if it had nothing to recap. The watcher polls the same call and announces an agent when it turns `done`, errors, or needs you (blocked on a permission or a question).
+- **Orca agents** — a voice-launched task becomes `orca agent launch --agent claude --worktree path:<dir> --prompt <task>`: the agent opens as a tab in Orca, where you can watch it and take over, and Vox speaks its answer when it finishes. The concurrency cap counts agents working in Orca. "Stop" closes the tabs of agents Vox launched that are still busy; anything Orca won't close has to be stopped in Orca. Quitting Vox leaves them running. The deny list below does not apply: Orca starts a normal interactive Claude Code session that asks before risky tools as usual (and Vox tells you when it is waiting on you).
+- **Conductor state** (`backend: conductor`) — read-only, via the system `sqlite3` CLI against Conductor's own database (`~/Library/Application Support/com.conductor.app/conductor.db`). Vox never writes to it.
+- **Conductor agents** — voice-launched tasks run as `claude --print --dangerously-skip-permissions "<task>"` in the target worktree (the active project, or any worktree resolved by name from Conductor's database; Orca agents are launched as above), with a 10-minute default timeout (`VOX_AGENT_TIMEOUT`) and a live agent-count badge on the pill. Because nobody can approve prompts in `--print` mode, agents get a hard deny list (`--disallowedTools`) covering `git push`, `git reset --hard`, `git clean`, `git branch -D`, `rm -rf`, `sudo`, `gh pr merge`, `gh release`, `npm publish` and `cargo publish`.
 
 ## Building from source
 
