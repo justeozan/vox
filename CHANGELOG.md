@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Waveform shows the real signal.** While you talk, the bars follow the
+  microphone level; while Vox talks they follow the loudness of the clip being
+  played (a 20 ms RMS envelope read at the audio's `currentTime`, so playback and
+  echo cancellation are untouched). Bars scroll right, newest on the right.
+  If a clip's envelope can't be computed, that clip falls back to the old
+  synthetic motion.
+- **Agent badge is `N` + a robot icon** instead of `N agents` / `1 · repo`. The
+  antenna pulses and the eyes scan while agents run; repo/worktree names are in
+  the tooltip. Respects reduced-motion.
+
+### Changed
+- **Bluetooth headphones stay out of call mode.** When the default input is a
+  Bluetooth device, Vox captures from the Mac's built-in mic instead (looked up
+  through CoreAudio), so the headset keeps its high-quality output profile. USB
+  and built-in inputs are left alone. Falls back to the default input if the
+  built-in mic can't be matched.
+- The `⌥ space` hint is gone from the bar, and the empty label no longer reserves
+  84 px. The waveform stays still while agents run (the work indicator moved to
+  the badge).
+- Pill geometry: the window is a fixed transparent envelope; the page animates
+  the pill shape in CSS and only the native blur is animated natively, with the
+  same curve and duration (no more per-frame window resizing).
+
+### Fixed
+- The agent badge sat ~24 px short of the right edge: the two hidden (0-width)
+  gear buttons still contributed flex gap.
+- "agents active" label duplicated the count shown in the badge.
+
 ## 0.5.0
 
 Orca becomes the workspace backend, and Vox behaves like a real Mac app.
