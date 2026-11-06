@@ -584,6 +584,50 @@ unsafe fn sync_pill_radius() {
     }
 }
 
+/// The class the pill window is converted to: an NSPanel subclass built at
+/// runtime that reports an active appearance even when it isn't key.
+///
+/// Liquid Glass draws differently by window state: a key window gets the full
+/// lensing/refraction, anything else gets a flat frosted blur. The pill is a
+/// non-activating panel, so it is NEVER key, and the moment another app is
+/// clicked the glass went milky. (The old NSVisualEffectView fallback never had
+/// this problem: window-vibrancy pins its `state` to Active.) Probed on macOS
+/// 26.7: of the window's appearance hooks only
+/// `_hasActiveAppearanceIgnoringKeyFocus` drives the glass, and answering YES
+/// restores the refraction while unfocused. Private selector, so the override
+/// is inert if a future OS stops asking for it. Falls back to plain NSPanel.
+#[cfg(target_os = "macos")]
+unsafe fn pill_panel_class() -> Option<*mut objc2::runtime::AnyClass> {
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
+    use std::sync::OnceLock;
+
+    unsafe extern "C-unwind" fn always_active(_this: *mut AnyObject, _cmd: Sel) -> Bool {
+        Bool::YES
+    }
+
+    static CLASS: OnceLock<usize> = OnceLock::new();
+    let addr = *CLASS.get_or_init(|| unsafe {
+        let Some(panel) = AnyClass::get(c"NSPanel") else { return 0 };
+        let sub = objc2::ffi::objc_allocateClassPair(panel, c"VoxPillPanel".as_ptr(), 0);
+        if sub.is_null() {
+            return panel as *const AnyClass as usize;
+        }
+        let imp: unsafe extern "C-unwind" fn(*mut AnyObject, Sel) -> Bool = always_active;
+        objc2::ffi::class_addMethod(
+            sub,
+            Sel::register(c"_hasActiveAppearanceIgnoringKeyFocus"),
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(*mut AnyObject, Sel) -> Bool,
+                Imp,
+            >(imp),
+            c"B@:".as_ptr(),
+        );
+        objc2::ffi::objc_registerClassPair(sub);
+        sub as usize
+    });
+    (addr != 0).then_some(addr as *mut AnyClass)
+}
+
 /// Liquid Glass style. Always "clear": the "regular" style lays its own dark
 /// frosted wash over the pill (with the dark appearance pinned), which read as
 /// a black veil snapping on below 50%. The slider is now purely the CSS tint,
@@ -1486,11 +1530,8 @@ pub fn run() {
                     // Swizzling the class of a live window is how tauri-nspanel
                     // does it too. Guarded: if NSPanel can't be found we simply
                     // keep the plain window rather than crash.
-                    if let Some(panel_cls) = objc2::runtime::AnyClass::get(c"NSPanel") {
-                        objc2::ffi::object_setClass(
-                            ns_win as *mut _,
-                            panel_cls as *const _ as *mut _,
-                        );
+                    if let Some(panel_cls) = pill_panel_class() {
+                        objc2::ffi::object_setClass(ns_win as *mut _, panel_cls);
                         // NSWindowStyleMaskNonactivatingPanel (1<<7) is only
                         // honoured by NSPanel — hence the class change first.
                         let mask: usize = msg_send![ns_win, styleMask];

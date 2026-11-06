@@ -40,6 +40,19 @@
 - The agent badge sat ~24 px short of the right edge: the two hidden (0-width)
   gear buttons still contributed flex gap.
 - "agents active" label duplicated the count shown in the badge.
+- **Liquid Glass no longer goes flat when you click another app.** The pill is a
+  non-activating panel, so it is never the key window, and macOS 26 draws glass
+  in a non-key window as a plain frosted blur (no refraction). The pill's panel
+  class now answers `_hasActiveAppearanceIgnoringKeyFocus` with YES, which keeps
+  the full glass unfocused. Private selector: inert if a future macOS drops it.
+- **⌥Space now means stop.** An announcement cut off mid-sentence used to go back
+  to the front of the queue and start again 5–30 s later. It is now parked: it
+  stays counted on the badge (click to hear it) and in the result store, but
+  never restarts on its own. The announcement drainer also waits for a *ready*
+  item instead of spinning while only parked ones remain.
+- **Two bare numbers in the bar.** The pending-announcements counter is now
+  `N` + a speaker icon, like the agent badge's `N` + robot, so the two read as
+  different things.
 
 ## 0.5.0
 

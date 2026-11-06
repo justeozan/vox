@@ -717,9 +717,6 @@
     background: transparent;
     border-color: rgba(167,139,250,0.55);
     color: #c9b8fd;
-    min-width: 22px;
-    text-align: center;
-    padding: 2px 7px;
     cursor: pointer;
   }
 
@@ -1221,6 +1218,13 @@ const AGENT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
   + '<path d="M12 8V4.5"/><circle class="ag-ant" cx="12" cy="3.5" r="1"/>'
   + '<g class="ag-eyes"><path d="M9 13.5v1.2M15 13.5v1.2"/></g></svg>'
 
+// Speaker with sound waves: "something is waiting to be said". Same stroke
+// language as AGENT_ICON, so the two counters read as different things at a
+// glance instead of two bare numbers side by side.
+const ANNOUNCE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5z"/>'
+  + '<path d="M15.5 9.2a4 4 0 0 1 0 5.6"/><path d="M18.2 6.8a7.6 7.6 0 0 1 0 10.4"/></svg>'
+
 function updateBadge() {
   const badge = document.getElementById('badge')
   // "N <icon>" — compact enough to sit in the bar without crowding the
@@ -1233,12 +1237,12 @@ function updateBadge() {
 
 function updateAnnounceBadge() {
   const b = document.getElementById('announce-badge')
-  b.textContent = pendingAnnouncements
+  b.innerHTML = pendingAnnouncements + ANNOUNCE_ICON
   b.title = pendingAnnouncements
     ? (uiLang === 'en' ? 'Click to hear what\'s waiting' : 'Clique pour entendre ce qui attend')
     : ''
   // Hidden while actually announcing — the pill itself is the signal then.
-  b.style.display = (pendingAnnouncements > 0 && state !== 'announcing') ? 'block' : 'none'
+  b.style.display = (pendingAnnouncements > 0 && state !== 'announcing') ? 'inline-flex' : 'none'
 }
 
 // ── Waveform ──────────────────────────────────────────────────────────────────
@@ -1709,8 +1713,9 @@ async function toggleVox() {
   // an unprompted announcement. 'thinking' stays a no-op: interrupting an
   // in-flight LLM call and letting a new turn start would race the abandoned
   // reply onto the voice.
-  // An interrupted announcement is NOT lost — the backend queue is durable and
-  // puts it back at the front, so it returns once you're quiet again.
+  // An interrupted announcement is NOT lost, but it does not come back by
+  // itself either: the backend parks it (badge count stays, a badge click
+  // replays it). ⌥Space means stop.
   if (state === 'boot' || state === 'speaking' || state === 'announcing') {
     interruptSpeech()
     return
