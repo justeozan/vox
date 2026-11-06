@@ -8,8 +8,8 @@
 //! every Ollama call, and multi-KB agent answers would poison a 3B's context
 //! within two agents.
 //!
-//! **The queue** is durable: announcements survive an ⌥Space interrupt and come
-//! back. One drainer thread owns all speaking, so N pending announcements cost N
+//! **The queue** is durable: announcements survive an ⌥Space interrupt but are
+//! parked, not re-spoken on their own (badge click replays them). One drainer thread owns all speaking, so N pending announcements cost N
 //! `VecDeque` entries rather than N parked OS threads.
 
 use std::collections::VecDeque;
@@ -39,6 +39,8 @@ const MAX_RESULTS: usize = 20;
 const RESULT_FRESH_SECS: u64 = 30 * 60;
 /// At most this many recent results are shown to the model.
 const RESULTS_IN_PROMPT: usize = 4;
+/// `not_before` of an announcement the user interrupted: never, until asked.
+const PARKED: u64 = u64::MAX;
 /// After this many interrupted attempts, stop trying to speak an item.
 const MAX_ATTEMPTS: u8 = 4;
 /// Suppress a repeat of the same key for this long after speaking it.
@@ -89,7 +91,7 @@ pub struct Announcement {
     pub original_ask: Option<String>,
     pub created_unix: u64,
     pub attempts: u8,
-    /// Earliest time this may be spoken (back-off after an interrupt).
+    /// Earliest time this may be spoken (`PARKED` after an interrupt).
     pub not_before: u64,
 }
 
@@ -316,7 +318,9 @@ pub fn start_drainer(app: AppHandle, state: Arc<AppState>) {
         {
             let (lock, cv) = &*state.announce_q;
             let mut q = lock.lock().unwrap();
-            while q.items.is_empty() {
+            // Wait for a READY item, not just any item: an interrupted one is
+            // parked (see `requeue`) and must not keep this loop spinning.
+            while !q.items.iter().any(|a| a.not_before <= now_unix()) {
                 let (g, _) = cv.wait_timeout(q, Duration::from_millis(400)).unwrap();
                 q = g;
             }
@@ -405,11 +409,14 @@ fn pop_batch(state: &Arc<AppState>) -> Vec<Announcement> {
     batch
 }
 
-/// An interrupted batch goes back to the FRONT, in order, with a growing
-/// back-off. Nothing is ever lost — but if the user keeps cutting it off, the
-/// voice gives up while the content stays answerable.
+/// An interrupted batch is PARKED, not re-spoken. ⌥Space means "stop talking":
+/// the old behaviour (back to the front with a 5–30 s back-off) made Vox start
+/// the same announcement again a few seconds after being cut off. Now the item
+/// stays in the queue with `not_before = PARKED`, so nothing speaks it on its
+/// own; it is still counted on the badge, and a click on the badge
+/// (`speak_now`) or a fresh answer from the same agent brings it back. The
+/// content also stays answerable via the result store.
 fn requeue(app: &AppHandle, state: &Arc<AppState>, batch: Vec<Announcement>) {
-    let now = now_unix();
     let count = {
         let (lock, cv) = &*state.announce_q;
         let mut q = lock.lock().unwrap();
@@ -419,7 +426,7 @@ fn requeue(app: &AppHandle, state: &Arc<AppState>, batch: Vec<Announcement>) {
                 println!("[vox] announcement {} interrupted {}x — memory only", a.key, a.attempts);
                 continue;
             }
-            a.not_before = now + (5 * a.attempts as u64).min(30);
+            a.not_before = PARKED;
             q.items.push_front(a);
         }
         cv.notify_all();

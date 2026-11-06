@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Waveform shows the real signal.** While you talk, the bars follow the
+  microphone level; while Vox talks they follow the loudness of the clip being
+  played (a 20 ms RMS envelope read at the audio's `currentTime`, so playback and
+  echo cancellation are untouched). Bars scroll right, newest on the right.
+  If a clip's envelope can't be computed, that clip falls back to the old
+  synthetic motion.
+- **Agent badge is `N` + a robot icon** instead of `N agents` / `1 · repo`. The
+  antenna pulses and the eyes scan while agents run; repo/worktree names are in
+  the tooltip. Respects reduced-motion.
+
+### Changed
+- **Bluetooth headphones stay out of call mode.** When the default input is a
+  Bluetooth device, Vox points the system default input at the Mac's built-in mic
+  while it listens and puts it back as soon as it stops (or on quit), so the
+  headset keeps its high-quality output profile — like the system dictation key.
+  USB and built-in inputs are left alone; if you change the input yourself
+  meanwhile, Vox doesn't override it.
+- **Other sounds are silenced while Vox listens**, like the system dictation: music
+  and videos fade out when the mic opens and fade back in when it closes (they
+  come back while Vox speaks, since its voice plays from the same output).
+  Replaces the partial ducking the voice-processing mic did on its own.
+- **Recap and settings buttons moved into the project overview.** They no longer
+  appear on hover in the bar: click the pill to open the project list and they sit
+  at its bottom-right, just above the agent badge (the bar keeps only the dot and
+  the badge). The list now opens even with no worktrees, so the buttons stay
+  reachable; settings keeps the buttons so the gear closes it again.
+- The `⌥ space` hint is gone from the bar, and the empty label no longer reserves
+  84 px. The waveform stays still while agents run (the work indicator moved to
+  the badge).
+- Pill geometry: the window is a fixed transparent envelope; the page animates
+  the pill shape in CSS and only the native blur is animated natively, with the
+  same curve and duration (no more per-frame window resizing).
+
+### Fixed
+- The agent badge sat ~24 px short of the right edge: the two hidden (0-width)
+  gear buttons still contributed flex gap.
+- "agents active" label duplicated the count shown in the badge.
+- **Liquid Glass no longer goes flat when you click another app.** The pill is a
+  non-activating panel, so it is never the key window, and macOS 26 draws glass
+  in a non-key window as a plain frosted blur (no refraction). The pill's panel
+  class now answers `_hasActiveAppearanceIgnoringKeyFocus` with YES, which keeps
+  the full glass unfocused. Private selector: inert if a future macOS drops it.
+- **⌥Space now means stop.** An announcement cut off mid-sentence used to go back
+  to the front of the queue and start again 5–30 s later. It is now parked: it
+  stays counted on the badge (click to hear it) and in the result store, but
+  never restarts on its own. The announcement drainer also waits for a *ready*
+  item instead of spinning while only parked ones remain.
+- **Two bare numbers in the bar.** The pending-announcements counter is now
+  `N` + a speaker icon, like the agent badge's `N` + robot, so the two read as
+  different things.
+
 ## 0.5.0
 
 Orca becomes the workspace backend, and Vox behaves like a real Mac app.

@@ -6,6 +6,7 @@
 //! the source of the "grey frame" overflow bug.
 
 pub mod agents;
+pub mod audio_route;
 pub mod announce;
 pub mod brain;
 pub mod conductor;
@@ -67,6 +68,20 @@ pub struct Settings {
     /// Orca) | "conductor" (its SQLite DB; agents run headless).
     #[serde(default = "default_backend")]
     pub backend: String,
+    /// Pill transparency, 0 (dark, most legible) ..= 100 (clearest glass).
+    /// Drives the CSS tint and, on macOS 26+, the Liquid Glass style.
+    #[serde(default = "default_glass_transparency")]
+    pub glass_transparency: u8,
+    /// Idle seconds before the pill folds into the water drop. 0 = never.
+    #[serde(default = "default_drop_after_secs")]
+    pub drop_after_secs: u64,
+}
+
+fn default_glass_transparency() -> u8 {
+    40
+}
+fn default_drop_after_secs() -> u64 {
+    180
 }
 
 fn default_backend() -> String {
@@ -232,7 +247,26 @@ fn load_settings() -> Settings {
         }
         d
     };
-    Settings { model, language, agent_reply, agent_reply_max_chars, tts_engine, provider, backend }
+    let glass_transparency = persisted
+        .get("glass_transparency")
+        .and_then(|v| v.as_u64())
+        .map(|n| n.min(100) as u8)
+        .unwrap_or_else(default_glass_transparency);
+    let drop_after_secs = persisted
+        .get("drop_after_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(default_drop_after_secs);
+    Settings {
+        model,
+        language,
+        agent_reply,
+        agent_reply_max_chars,
+        tts_engine,
+        provider,
+        backend,
+        glass_transparency,
+        drop_after_secs,
+    }
 }
 
 fn save_settings(s: &Settings) {
@@ -316,7 +350,6 @@ pub struct AppState {
     /// mismatch as "cancelled". A counter (not a bool) so an old interrupt can
     /// never be un-armed by a later turn and resurrect a killed session.
     pub interrupt_gen: AtomicU64,
-    pub anim_gen: AtomicU64,
     pub paths: Mutex<Paths>,
     pub speak_lock: Mutex<()>,
     /// Renderer pill state, mirrored from `setState` (see UI_* below). The
@@ -411,63 +444,236 @@ fn request_microphone_access() {
 }
 
 
-// ── Window frame animation ───────────────────────────────────────────────────
-// Bottom-anchored, horizontally centered grow/shrink. Stepped resize with
-// ease-out cubic — runs off the main thread, each step dispatches to AppKit.
+// ── Pill geometry: fixed envelope, native blur animated by Core Animation ────
+// The window is a FIXED transparent ENV_W x ENV_H envelope, never resized after
+// setup. Resizing a native window per frame is non-atomic (size and position
+// are separate calls) and the WKWebView relayouts a frame late — grey band,
+// bar jumping. Instead the page animates the pill's visible shape in CSS and
+// natively we animate ONLY the NSVisualEffectView (the blur) to the same rect
+// with the same curve + duration, composited by Core Animation. The pill is
+// always bottom-centered in the envelope.
 
-fn animate_frame(window: WebviewWindow, state: Arc<AppState>, gen: u64, tw: f64, th: f64) {
-    let scale = window.scale_factor().unwrap_or(2.0);
-    let (Ok(size), Ok(pos)) = (window.inner_size(), window.outer_position()) else { return };
-    let cw = size.width as f64 / scale;
-    let ch = size.height as f64 / scale;
-    let cx = pos.x as f64 / scale;
-    let cy = pos.y as f64 / scale;
-    if (cw - tw).abs() < 0.5 && (ch - th).abs() < 0.5 {
+pub const ENV_W: f64 = 520.0;
+pub const ENV_H: f64 = 640.0;
+
+/// Rect in contentView coordinates (AppKit: origin bottom-left) — or, for the
+/// hit rect, offset by the window frame origin into screen coordinates.
+#[derive(Clone, Copy)]
+struct PillRect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+impl PillRect {
+    fn union(self, o: PillRect) -> PillRect {
+        let x0 = self.x.min(o.x);
+        let y0 = self.y.min(o.y);
+        let x1 = (self.x + self.w).max(o.x + o.w);
+        let y1 = (self.y + self.h).max(o.y + o.h);
+        PillRect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    }
+}
+
+fn pill_rect(width: f64, height: f64) -> PillRect {
+    PillRect { x: (ENV_W - width) / 2.0, y: 0.0, w: width, h: height }
+}
+
+/// The pill animation in flight: from → to over `dur`, on the shared curve.
+/// The poller uses the UNION of from+to as the hit rect until it ends, so the
+/// growing/shrinking pill never outruns its own click-through hit area, and
+/// interpolates the native corner radius from it every tick.
+#[derive(Clone, Copy)]
+struct PillAnim {
+    from: PillRect,
+    to: PillRect,
+    start: std::time::Instant,
+    dur: Duration,
+}
+
+impl PillAnim {
+    fn progress(&self, now: std::time::Instant) -> f64 {
+        if self.dur.is_zero() {
+            return 1.0;
+        }
+        let x = (now.saturating_duration_since(self.start).as_secs_f64() / self.dur.as_secs_f64())
+            .clamp(0.0, 1.0);
+        pill_ease(x)
+    }
+    fn height_at(&self, now: std::time::Instant) -> f64 {
+        let p = self.progress(now);
+        self.from.h + (self.to.h - self.from.h) * p
+    }
+    fn rect_at(&self, now: std::time::Instant) -> PillRect {
+        let p = self.progress(now);
+        let w = self.from.w + (self.to.w - self.from.w) * p;
+        pill_rect(w, self.height_at(now))
+    }
+    fn running(&self, now: std::time::Instant) -> bool {
+        now < self.start + self.dur
+    }
+}
+
+/// cubic-bezier(0.32, 0.72, 0, 1) — the same curve as the CSS --pill-ease and
+/// the CAMediaTimingFunction in set_pill_frame. Solves x(s) = t by bisection.
+fn pill_ease(t: f64) -> f64 {
+    const P1: (f64, f64) = (0.32, 0.72);
+    const P2: (f64, f64) = (0.0, 1.0);
+    let bez = |s: f64, a: f64, b: f64| {
+        let r = 1.0 - s;
+        3.0 * r * r * s * a + 3.0 * r * s * s * b + s * s * s
+    };
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.0;
+        if bez(mid, P1.0, P2.0) < t { lo = mid } else { hi = mid }
+    }
+    bez((lo + hi) / 2.0, P1.1, P2.1)
+}
+
+static PILL_STATE: Mutex<Option<PillAnim>> = Mutex::new(None);
+static PILL_BASE: PillRect = PillRect { x: (ENV_W - BAR_W) / 2.0, y: 0.0, w: BAR_W, h: BAR_H };
+
+/// The native view behind the pill: an NSGlassEffectView (Liquid Glass, macOS
+/// 26+) or, before that, window-vibrancy's NSVisualEffectViewTagged. Both take
+/// setCornerRadius:. Only ever dereferenced on the main thread.
+#[cfg(target_os = "macos")]
+static PILL_BG_VIEW: AtomicUsize = AtomicUsize::new(0);
+/// True when PILL_BG_VIEW is Liquid Glass.
+static LIQUID_GLASS: AtomicBool = AtomicBool::new(false);
+/// Last radius pushed to the native view (f64 bits), to skip no-op sets.
+#[cfg(target_os = "macos")]
+static PILL_RADIUS_NOW: AtomicU64 = AtomicU64::new(0);
+
+/// A capsule: half the height, capped at the pill's 28pt once panels make it
+/// tall. The water drop (48pt) is therefore a circle.
+fn radius_for(h: f64) -> f64 {
+    (h / 2.0).min(PILL_RADIUS)
+}
+
+fn current_hit_rect() -> PillRect {
+    let g = PILL_STATE.lock().unwrap();
+    match *g {
+        Some(a) => {
+            if a.running(std::time::Instant::now()) { a.from.union(a.to) } else { a.to }
+        }
+        None => PILL_BASE,
+    }
+}
+
+/// Main thread only. Keeps the native corner radius a true capsule at every
+/// frame. Not left to Core Animation: the glass view's cornerRadius isn't an
+/// animatable key, and a fixed radius on a shrinking pill reads as a squircle
+/// (or worse, overshoots on the 48pt drop).
+#[cfg(target_os = "macos")]
+unsafe fn sync_pill_radius() {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    let view = PILL_BG_VIEW.load(Ordering::SeqCst) as *mut AnyObject;
+    if view.is_null() {
         return;
     }
-    let tx = cx - (tw - cw) / 2.0;
-    let ty = cy - (th - ch); // tauri y grows downward; keep bottom edge fixed
-
-    // When growing, expand the size BEFORE recentering the origin — otherwise
-    // set_position moves the window left while it's still narrow, so the right
-    // edge briefly recedes and clips before the size step widens it again.
-    let growing = tw > cw || th > ch;
-
-    // ~240ms with a quintic ease-out. Two reasons for the longer, softer curve:
-    //  - it moves the native frame in step with the in-page CSS reveal (the gear
-    //    width + bar gap transition over 0.35s var(--smooth)), so the pill edge
-    //    and its contents expand as ONE gesture instead of the edge snapping wide
-    //    in 120ms and the content trailing behind it;
-    //  - a quintic tail (vs cubic) settles the last few pixels more gently, so
-    //    the growing edge eases into place rather than arriving with a hard stop.
-    // 40 steps keeps ≥1 position update per display refresh even on 120Hz
-    // ProMotion, so the motion never reads as stepped.
-    const STEPS: u32 = 40;
-    for i in 1..=STEPS {
-        if state.anim_gen.load(Ordering::SeqCst) != gen {
-            return; // superseded by a newer animation
-        }
-        let t = i as f64 / STEPS as f64;
-        let e = 1.0 - (1.0 - t).powi(5);
-        let pos = tauri::LogicalPosition::new(cx + (tx - cx) * e, cy + (ty - cy) * e);
-        let size = tauri::LogicalSize::new(cw + (tw - cw) * e, ch + (th - ch) * e);
-        if growing {
-            let _ = window.set_size(size);
-            let _ = window.set_position(pos);
-        } else {
-            let _ = window.set_position(pos);
-            let _ = window.set_size(size);
-        }
-        std::thread::sleep(Duration::from_millis(6));
+    let h = match *PILL_STATE.lock().unwrap() {
+        Some(a) => a.height_at(std::time::Instant::now()),
+        None => PILL_BASE.h,
+    };
+    let r = (radius_for(h) * 2.0).round() / 2.0;
+    if PILL_RADIUS_NOW.swap(r.to_bits(), Ordering::SeqCst) != r.to_bits() {
+        let _: () = msg_send![view, setCornerRadius: r];
     }
+}
+
+/// The class the pill window is converted to: an NSPanel subclass built at
+/// runtime that reports an active appearance even when it isn't key.
+///
+/// Liquid Glass draws differently by window state: a key window gets the full
+/// lensing/refraction, anything else gets a flat frosted blur. The pill is a
+/// non-activating panel, so it is NEVER key, and the moment another app is
+/// clicked the glass went milky. (The old NSVisualEffectView fallback never had
+/// this problem: window-vibrancy pins its `state` to Active.) Probed on macOS
+/// 26.7: of the window's appearance hooks only
+/// `_hasActiveAppearanceIgnoringKeyFocus` drives the glass, and answering YES
+/// restores the refraction while unfocused. Private selector, so the override
+/// is inert if a future OS stops asking for it. Falls back to plain NSPanel.
+#[cfg(target_os = "macos")]
+unsafe fn pill_panel_class() -> Option<*mut objc2::runtime::AnyClass> {
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
+    use std::sync::OnceLock;
+
+    unsafe extern "C-unwind" fn always_active(_this: *mut AnyObject, _cmd: Sel) -> Bool {
+        Bool::YES
+    }
+
+    static CLASS: OnceLock<usize> = OnceLock::new();
+    let addr = *CLASS.get_or_init(|| unsafe {
+        let Some(panel) = AnyClass::get(c"NSPanel") else { return 0 };
+        let sub = objc2::ffi::objc_allocateClassPair(panel, c"VoxPillPanel".as_ptr(), 0);
+        if sub.is_null() {
+            return panel as *const AnyClass as usize;
+        }
+        let imp: unsafe extern "C-unwind" fn(*mut AnyObject, Sel) -> Bool = always_active;
+        objc2::ffi::class_addMethod(
+            sub,
+            Sel::register(c"_hasActiveAppearanceIgnoringKeyFocus"),
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(*mut AnyObject, Sel) -> Bool,
+                Imp,
+            >(imp),
+            c"B@:".as_ptr(),
+        );
+        objc2::ffi::objc_registerClassPair(sub);
+        sub as usize
+    });
+    (addr != 0).then_some(addr as *mut AnyClass)
+}
+
+/// Liquid Glass style. Always "clear": the "regular" style lays its own dark
+/// frosted wash over the pill (with the dark appearance pinned), which read as
+/// a black veil snapping on below 50%. The slider is now purely the CSS tint,
+/// so it changes continuously with no jump. `transparency` kept for callers.
+fn apply_glass_style(app: &AppHandle, transparency: u8) {
+    #[cfg(target_os = "macos")]
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.run_on_main_thread(move || unsafe { set_glass_style(transparency) });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, transparency);
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn set_glass_style(transparency: u8) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyObject, Sel};
+    if !LIQUID_GLASS.load(Ordering::SeqCst) {
+        return;
+    }
+    let view = PILL_BG_VIEW.load(Ordering::SeqCst) as *mut AnyObject;
+    if view.is_null() {
+        return;
+    }
+    let sel = Sel::register(c"setStyle:");
+    let ok: bool = msg_send![view, respondsToSelector: sel];
+    if ok {
+        // NSGlassEffectViewStyleRegular = 0, NSGlassEffectViewStyleClear = 1
+        let _ = transparency;
+        let style: isize = 1;
+        let _: () = msg_send![view, setStyle: style];
+    }
+}
+
+#[tauri::command]
+fn glass_info() -> Value {
+    json!({ "liquid_glass": LIQUID_GLASS.load(Ordering::SeqCst) })
 }
 
 fn position_bottom_center(window: &WebviewWindow) {
     if let Ok(Some(mon)) = window.primary_monitor() {
         let scale = mon.scale_factor();
         let ms = mon.size().to_logical::<f64>(scale);
-        let x = (ms.width - BAR_W) / 2.0;
-        let y = ms.height - BAR_H - 96.0; // clear the dock
+        // Pill bottom stays 96pt above the screen bottom (clear the dock).
+        let x = (ms.width - ENV_W) / 2.0;
+        let y = ms.height - ENV_H - 96.0;
         let _ = window.set_position(tauri::LogicalPosition::new(x, y));
     }
 }
@@ -611,6 +817,14 @@ async fn set_settings(
                     settings.backend = b;
                 }
             }
+            // Pure appearance / UI timing: no restart, applied right here.
+            if let Some(t) = next.get("glass_transparency").and_then(|v| v.as_u64()) {
+                settings.glass_transparency = t.min(100) as u8;
+                apply_glass_style(&app, settings.glass_transparency);
+            }
+            if let Some(n) = next.get("drop_after_secs").and_then(|v| v.as_u64()) {
+                settings.drop_after_secs = n.min(24 * 3600);
+            }
             if let Some(e) = next.get("tts_engine").and_then(|v| v.as_str()) {
                 let e = e.to_lowercase();
                 if TTS_ENGINES.contains(&e.as_str()) && e != settings.tts_engine {
@@ -656,6 +870,8 @@ async fn set_settings(
             "agent_reply": s.agent_reply,
             "agent_reply_max_chars": s.agent_reply_max_chars,
             "backend": s.backend,
+            "glass_transparency": s.glass_transparency,
+            "drop_after_secs": s.drop_after_secs,
             "restarted": restart,
         }))
     })
@@ -732,16 +948,62 @@ fn audio_done(state: tauri::State<'_, Arc<AppState>>, id: u64) {
     }
 }
 
+/// Animate the native blur to the pill's new size (the page animates the
+/// visible shape itself). Same curve as the CSS: cubic-bezier(0.32,0.72,0,1).
 #[tauri::command]
-fn resize_window(
-    window: WebviewWindow,
-    state: tauri::State<'_, Arc<AppState>>,
-    width: f64,
-    height: f64,
-) {
-    let gen = state.anim_gen.fetch_add(1, Ordering::SeqCst) + 1;
-    let st = state.inner().clone();
-    std::thread::spawn(move || animate_frame(window, st, gen, width, height));
+fn set_pill_frame(window: WebviewWindow, width: f64, height: f64, duration_ms: u64) {
+    let target = pill_rect(width, height);
+    {
+        let mut g = PILL_STATE.lock().unwrap();
+        let now = std::time::Instant::now();
+        // Start from where the pill IS (mid-flight if interrupted), like the
+        // CSS transition and Core Animation both do.
+        let from = g.map(|a| a.rect_at(now)).unwrap_or(PILL_BASE);
+        *g = Some(PillAnim { from, to: target, start: now, dur: Duration::from_millis(duration_ms) });
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = window.run_on_main_thread(move || unsafe {
+            use objc2::msg_send;
+            use objc2::runtime::{AnyClass, AnyObject};
+            use objc2_foundation::{NSPoint, NSRect, NSSize};
+            let view = PILL_BG_VIEW.load(Ordering::SeqCst) as *mut AnyObject;
+            if view.is_null() {
+                return;
+            }
+            sync_pill_radius();
+            let rect = NSRect::new(
+                NSPoint::new(target.x, target.y),
+                NSSize::new(target.w, target.h),
+            );
+            if duration_ms == 0 {
+                let _: () = msg_send![view, setFrame: rect];
+                return;
+            }
+            let _: () = msg_send![AnyClass::get(c"NSAnimationContext").unwrap(), beginGrouping];
+            let ctx: *mut AnyObject =
+                msg_send![AnyClass::get(c"NSAnimationContext").unwrap(), currentContext];
+            let _: () = msg_send![ctx, setDuration: duration_ms as f64 / 1000.0];
+            if let Some(cls) = AnyClass::get(c"CAMediaTimingFunction") {
+                // `functionWithControlPoints::::` has empty selector labels,
+                // which msg_send! can't spell — register the Sel by hand.
+                use objc2::runtime::Sel;
+                use objc2::runtime::MessageReceiver;
+                let sel = Sel::register(c"functionWithControlPoints::::");
+                let tf: *mut AnyObject =
+                    cls.send_message(sel, (0.32f32, 0.72f32, 0.0f32, 1.0f32));
+                if !tf.is_null() {
+                    let _: () = msg_send![ctx, setTimingFunction: tf];
+                }
+            }
+            let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
+            let anim: *mut AnyObject = msg_send![view, animator];
+            let _: () = msg_send![anim, setFrame: rect];
+            let _: () = msg_send![AnyClass::get(c"NSAnimationContext").unwrap(), endGrouping];
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
 }
 
 /// Interrupt whatever Vox is currently saying — ⌥Space or barge-in. Bumps the
@@ -1088,6 +1350,8 @@ fn on_menu_event(app: &AppHandle, id: &str) {
 /// not run Drop on managed state, so without this the Python speech daemons
 /// and any running agents would be orphaned.
 fn shutdown(app: &AppHandle, state: &Arc<AppState>) {
+    audio_route::duck_other_audio(false);
+    audio_route::restore_mic_route();
     // Local only: agents running in Orca outlive Vox and must not be closed by it.
     agents::kill_local(app, state);
     if let Ok(mut g) = state.stt.lock() {
@@ -1128,7 +1392,6 @@ pub fn run() {
         active_project: Mutex::new(active_project),
         startup_brief_done: AtomicBool::new(false),
         interrupt_gen: AtomicU64::new(0),
-        anim_gen: AtomicU64::new(0),
         paths: Mutex::new(Paths {
             stt_script: None,
             tts_script: None,
@@ -1177,6 +1440,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            audio_route::route_mic_away_from_bluetooth,
+            audio_route::restore_mic_route,
+            audio_route::duck_other_audio,
             get_settings,
             set_settings,
             list_models,
@@ -1185,7 +1451,8 @@ pub fn run() {
             run_setup,
             voice_input,
             audio_done,
-            resize_window,
+            set_pill_frame,
+            glass_info,
             interrupt,
             ui_state,
             move_pill,
@@ -1263,11 +1530,8 @@ pub fn run() {
                     // Swizzling the class of a live window is how tauri-nspanel
                     // does it too. Guarded: if NSPanel can't be found we simply
                     // keep the plain window rather than crash.
-                    if let Some(panel_cls) = objc2::runtime::AnyClass::get(c"NSPanel") {
-                        objc2::ffi::object_setClass(
-                            ns_win as *mut _,
-                            panel_cls as *const _ as *mut _,
-                        );
+                    if let Some(panel_cls) = pill_panel_class() {
+                        objc2::ffi::object_setClass(ns_win as *mut _, panel_cls);
                         // NSWindowStyleMaskNonactivatingPanel (1<<7) is only
                         // honoured by NSPanel — hence the class change first.
                         let mask: usize = msg_send![ns_win, styleMask];
@@ -1356,38 +1620,133 @@ pub fn run() {
                         views.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>()
                     );
                     for (v, name) in &views {
+                        if name.contains("VisualEffect") {
+                            // Detach the blur from the window size: it must
+                            // stop filling the envelope and instead be framed
+                            // (and animated) to the pill rect. Its corner radius
+                            // (private setCornerRadius:, set by window-vibrancy)
+                            // scales with the frame, so it stays pill-shaped.
+                            PILL_BG_VIEW.store(*v as usize, Ordering::SeqCst);
+                            let _: () = msg_send![*v, setAutoresizingMask: 0usize];
+                            let base = objc2_foundation::NSRect::new(
+                                objc2_foundation::NSPoint::new(PILL_BASE.x, PILL_BASE.y),
+                                objc2_foundation::NSSize::new(PILL_BASE.w, PILL_BASE.h),
+                            );
+                            let _: () = msg_send![*v, setFrame: base];
+                        }
                         if name.contains("WebView") {
                             // Re-adding an attached subview moves it to the top
                             // of the sibling stack — above the vibrancy view.
                             let _: () = msg_send![content, addSubview: *v];
                             println!("[vox] raised {name} above vibrancy view");
-
-                            // Round the webview's OWN backing layer to the pill
-                            // radius so the GPU compositor clips its content at
-                            // all times — including mid-resize. Without this the
-                            // page's CSS `border-radius` + `overflow:hidden` is a
-                            // paint-time clip that lags one frame behind the
-                            // native frame during the hover grow, so the growing
-                            // edge flashes square corners before the CSS repaints
-                            // them round. A layer-level mask (same 28px circular
-                            // curve window-vibrancy gives the blur view) removes
-                            // that desync entirely — the corners are simply never
-                            // square. (The mask bounds track the frame without a
-                            // Core Animation tween: a layer-backed AppKit view
-                            // resizes its layer synchronously outside an animation
-                            // context, so nothing smears mid-step.)
-                            let _: () = msg_send![*v, setWantsLayer: true];
-                            let layer: *mut AnyObject = msg_send![*v, layer];
-                            if !layer.is_null() {
-                                let _: () = msg_send![layer, setCornerRadius: PILL_RADIUS];
-                                let _: () = msg_send![layer, setMasksToBounds: true];
-                            }
+                            // The webview now covers the whole transparent
+                            // envelope; the pill clip is CSS, not a layer mask.
                         }
                     }
+
+                    // Liquid Glass (macOS 26+): swap the blur for a real
+                    // NSGlassEffectView — refraction, specular rim, and the
+                    // "clear" style that makes the idle water drop read as a
+                    // bead of glass. Same frame/animation path as the blur;
+                    // the old vibrancy view stays as the fallback, hidden.
+                    let webview = views.iter().find(|(_, n)| n.contains("WebView")).map(|(v, _)| *v);
+                    if let (Some(glass_cls), Some(webview)) =
+                        (objc2::runtime::AnyClass::get(c"NSGlassEffectView"), webview)
+                    {
+                        let base = objc2_foundation::NSRect::new(
+                            objc2_foundation::NSPoint::new(PILL_BASE.x, PILL_BASE.y),
+                            objc2_foundation::NSSize::new(PILL_BASE.w, PILL_BASE.h),
+                        );
+                        let glass: *mut AnyObject = msg_send![glass_cls, alloc];
+                        let glass: *mut AnyObject = msg_send![glass, initWithFrame: base];
+                        if !glass.is_null() {
+                            let _: () = msg_send![glass, setAutoresizingMask: 0usize];
+                            let _: () = msg_send![glass, setCornerRadius: PILL_RADIUS];
+                            // Adaptive appearance OFF. By default (2 = "on")
+                            // the glass samples what's behind it and flips to a
+                            // white or black wash when the backdrop goes very
+                            // light or dark — the random "filters" over the
+                            // pill. Private (_adaptiveAppearance: 0 automatic,
+                            // 1 off, 2 on; read back via
+                            // _adaptationDebugDescription on macOS 26), so
+                            // guarded: unknown OS → keep the default.
+                            let sel = objc2::runtime::Sel::register(c"set_adaptiveAppearance:");
+                            let ok: bool = msg_send![glass, respondsToSelector: sel];
+                            if ok {
+                                let _: () = msg_send![glass, set_adaptiveAppearance: 1isize];
+                            }
+                            // NSWindowBelow = -1: under the page, above nothing.
+                            let _: () = msg_send![
+                                content,
+                                addSubview: glass,
+                                positioned: -1isize,
+                                relativeTo: webview
+                            ];
+                            let old = PILL_BG_VIEW.swap(glass as usize, Ordering::SeqCst) as *mut AnyObject;
+                            if !old.is_null() {
+                                let _: () = msg_send![old, setHidden: true];
+                            }
+                            LIQUID_GLASS.store(true, Ordering::SeqCst);
+                            let t = app.state::<Arc<AppState>>().settings.lock().unwrap().glass_transparency;
+                            set_glass_style(t);
+                            println!("[vox] pill background: Liquid Glass (NSGlassEffectView)");
+                        }
+                    }
+                    PILL_RADIUS_NOW.store(PILL_RADIUS.to_bits(), Ordering::SeqCst);
                 }
             }
 
             position_bottom_center(&window);
+
+            // Click-through poller. The envelope is mostly transparent; AppKit
+            // would still swallow clicks there. Every 16ms, toggle
+            // setIgnoresMouseEvents: by whether the cursor is inside the pill
+            // hit rect, and tell the renderer about hover (CSS :hover is dead
+            // while the window ignores events).
+            #[cfg(target_os = "macos")]
+            if let Ok(ptr) = window.ns_window() {
+                let win_addr = ptr as usize;
+                let win = window.clone();
+                let ignoring = Arc::new(AtomicBool::new(false));
+                let hovered = Arc::new(AtomicBool::new(false));
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(Duration::from_millis(16));
+                    let (win2, ignoring, hovered) = (win.clone(), ignoring.clone(), hovered.clone());
+                    let _ = win.run_on_main_thread(move || unsafe {
+                        use objc2::msg_send;
+                        use objc2::runtime::{AnyClass, AnyObject};
+                        use objc2_foundation::{NSPoint, NSRect};
+                        let ns_win = win_addr as *mut AnyObject;
+                        // Native read: we're already on the main thread, no
+                        // need for tauri's cross-thread getter round-trip.
+                        let visible: bool = msg_send![ns_win, isVisible];
+                        if !visible {
+                            return;
+                        }
+                        let ev = AnyClass::get(c"NSEvent").unwrap();
+                        let pt: NSPoint = msg_send![ev, mouseLocation];
+                        let buttons: usize = msg_send![ev, pressedMouseButtons];
+                        let fr: NSRect = msg_send![ns_win, frame];
+                        // Corner radius follows the animating height (see
+                        // sync_pill_radius) — a no-op once settled.
+                        sync_pill_radius();
+                        let h = current_hit_rect();
+                        let (rx, ry) = (fr.origin.x + h.x, fr.origin.y + h.y);
+                        let mut inside = pt.x >= rx && pt.x <= rx + h.w && pt.y >= ry && pt.y <= ry + h.h;
+                        // A drag/click in progress must never lose its events.
+                        if buttons != 0 && !ignoring.load(Ordering::SeqCst) {
+                            inside = true;
+                        }
+                        let want_ignore = !inside;
+                        if ignoring.swap(want_ignore, Ordering::SeqCst) != want_ignore {
+                            let _: () = msg_send![ns_win, setIgnoresMouseEvents: want_ignore];
+                        }
+                        if hovered.swap(inside, Ordering::SeqCst) != inside {
+                            let _ = win2.emit("pill-hover", inside);
+                        }
+                    });
+                });
+            }
 
             if let Err(e) = app.global_shortcut().register(alt_space) {
                 eprintln!("[vox] failed to register Alt+Space: {e}");
