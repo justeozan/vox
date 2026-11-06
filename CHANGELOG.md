@@ -15,10 +15,20 @@
 
 ### Changed
 - **Bluetooth headphones stay out of call mode.** When the default input is a
-  Bluetooth device, Vox captures from the Mac's built-in mic instead (looked up
-  through CoreAudio), so the headset keeps its high-quality output profile. USB
-  and built-in inputs are left alone. Falls back to the default input if the
-  built-in mic can't be matched.
+  Bluetooth device, Vox points the system default input at the Mac's built-in mic
+  while it listens and puts it back as soon as it stops (or on quit), so the
+  headset keeps its high-quality output profile — like the system dictation key.
+  USB and built-in inputs are left alone; if you change the input yourself
+  meanwhile, Vox doesn't override it.
+- **Other sounds are silenced while Vox listens**, like the system dictation: music
+  and videos fade out when the mic opens and fade back in when it closes (they
+  come back while Vox speaks, since its voice plays from the same output).
+  Replaces the partial ducking the voice-processing mic did on its own.
+- **Recap and settings buttons moved into the project overview.** They no longer
+  appear on hover in the bar: click the pill to open the project list and they sit
+  at its bottom-right, just above the agent badge (the bar keeps only the dot and
+  the badge). The list now opens even with no worktrees, so the buttons stay
+  reachable; settings keeps the buttons so the gear closes it again.
 - The `⌥ space` hint is gone from the bar, and the empty label no longer reserves
   84 px. The waveform stays still while agents run (the work indicator moved to
   the badge).

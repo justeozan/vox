@@ -222,7 +222,7 @@
     display: none;
     flex-direction: column;
     gap: 7px;
-    padding: 14px 16px 4px 16px;
+    padding: 14px 16px 34px 16px;   /* bottom: room for .panel-actions */
     flex: 0 0 auto;
     align-self: center;
     width: var(--panel-w);
@@ -306,7 +306,7 @@
     display: none;
     flex-direction: column;
     justify-content: flex-end;
-    padding: 16px 22px 4px 22px;
+    padding: 16px 22px 34px 22px;   /* bottom: room for .panel-actions */
     flex: 0 0 auto;
     align-self: center;
     width: var(--panel-w);
@@ -723,52 +723,43 @@
     cursor: pointer;
   }
 
-  /* ── Gear — revealed on hover with a spin-in ───────────────────────────── */
-  .gear {
-    width: 0;
-    /* Zero-width flex items still get a gap on each side; cancel it while
-       hidden so the badge sits flush with the bar's right padding instead of
-       24px short of it (two gears). */
-    margin-left: -12px;
-    height: 20px;
+  /* ── Panel actions — recap + settings, bottom-right of the open panel ───
+     Not in the bar any more: they live with the project overview, just above
+     the agent badge, and only exist while the carousel or settings is open. */
+  .panel-actions {
+    position: absolute;
+    right: 14px;
+    bottom: 62px;               /* bar 56 + border 2 + 4 */
+    z-index: 3;
+    display: none;
+    gap: 6px;
+    align-items: center;
+  }
+  body.carousel-open .panel-actions, body.settings-open .panel-actions {
+    display: flex;
+    animation: settingsIn 0.3s var(--smooth) forwards;
+  }
+  body.setup-open .panel-actions { display: none; }
+  .panel-btn {
+    width: 26px;
+    height: 26px;
     padding: 0;
-    border: none;
-    background: transparent;
-    color: rgba(255,255,255,0.5);
+    display: grid;
+    place-items: center;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 50%;
+    background: rgba(0,0,0,0.28);
+    color: rgba(255,255,255,0.55);
     cursor: pointer;
-    flex-shrink: 0;
-    opacity: 0;
-    overflow: hidden;
-    transform: rotate(-160deg) scale(0.4);
-    /* Hiding: no spring (an overshoot on the way out reads as a wobble). */
-    transition:
-      width 0.3s var(--pill-ease),
-      margin-left 0.3s var(--pill-ease),
-      opacity 0.3s var(--pill-ease),
-      transform 0.3s var(--pill-ease),
-      color 0.25s ease;
+    transition: color 0.25s ease, background 0.25s ease, transform 0.35s var(--spring);
   }
-  body.hovered .gear, body.settings-open .gear {
-    width: 20px;
-    margin-left: 0;
-    opacity: 1;
-    transform: rotate(0deg) scale(1);
-    /* Showing: keep the playful spin-in on the transform only. */
-    transition:
-      width 0.3s var(--pill-ease),
-      margin-left 0.3s var(--pill-ease),
-      opacity 0.3s var(--pill-ease),
-      transform 0.55s var(--spring),
-      color 0.25s ease;
-  }
-  .gear:hover { color: #d9ceff; transform: rotate(50deg) scale(1.12) !important; }
-  .gear:active { transform: rotate(120deg) scale(0.95) !important; }
-  .gear svg { display: block; width: 20px; height: 20px; }
-  body.settings-open .gear { color: #c3b1fc; }
+  .panel-btn:hover { color: #d9ceff; background: rgba(167,139,250,0.14); transform: scale(1.08); }
+  .panel-btn:active { transform: scale(0.94); }
+  .panel-btn svg { display: block; width: 15px; height: 15px; }
+  body.settings-open #gear { color: #c3b1fc; border-color: rgba(167,139,250,0.4); }
 
-  /* Hover: everything breathes a little wider. The gear has its own
-     transitions above, so it is excluded (this rule used to override them). */
-  .bar > *:not(.gear) { transition: transform 0.3s var(--smooth); }
+  /* Hover: everything breathes a little wider. */
+  .bar > * { transition: transform 0.3s var(--smooth); }
   /* Waking: content returns late (after the pill has grown) and gently. */
   .bar { transition: gap 0.3s var(--pill-ease), opacity 260ms var(--pill-ease) 180ms; }
   body.hovered .bar { gap: 13px; }
@@ -776,7 +767,7 @@
   body.dropped .bar { transition: gap 0.3s var(--pill-ease), opacity 140ms var(--pill-ease); }
 
   @media (prefers-reduced-motion: reduce) {
-    .bar, .gear, body.hovered .gear { transition-duration: 0.01ms; }
+    .bar, .panel-btn { transition-duration: 0.01ms; }
     body .bar, body.dropped .bar, .shell::after, body.dropped .drop-glyph, .drop-glyph {
       transition-duration: 0.01ms; transition-delay: 0s;
     }
@@ -986,14 +977,17 @@
     <div class="label" id="label" data-tauri-drag-region></div>
     <div class="badge announce" id="announce-badge" title="">0</div>
     <div class="badge" id="badge">0 agents</div>
-    <button class="gear" id="recap-btn" aria-label="recap">
+  </div>
+
+  <div class="panel-actions">
+    <button class="panel-btn" id="recap-btn" aria-label="recap">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <path d="M3 12a9 9 0 1 0 2.83-6.54"/>
         <polyline points="3 3 3 8 8 8"/>
         <path d="M12 7v5l3.5 2"/>
       </svg>
     </button>
-    <button class="gear" id="gear" aria-label="settings">
+    <button class="panel-btn" id="gear" aria-label="settings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="3.2"/>
         <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01a1.7 1.7 0 0 0 1.02-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.56 1.02H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1.06z"/>
@@ -1023,9 +1017,9 @@ const SPEECH_SNR         = 2.2
 // CSS pill drawn inside it (see syncWindow). Hover never changes the size: the
 // hover stretch was the most-noticed motion in the UI for the least
 // information — nothing about the pill's meaning changes when the cursor
-// arrives. The gear buttons reveal inside this width.
+// arrives.
 const SIZE_BASE     = [408, 56]
-const SIZE_SETTINGS = [500, 560]  // 9 rows × ~41px + header/padding
+const SIZE_SETTINGS = [500, 590]  // 9 rows × ~41px + header/padding + action row
 const SETTINGS_ROW_H = 41         // 10px padding ×2 + 40px min-height + 1px border
 const SIZE_SETUP    = [520, 470]
 
@@ -1210,6 +1204,7 @@ const UI_CODES = {
 function setState(s) {
   if (s !== state) lastSpeechSignal = Date.now()
   state = s
+  syncDuck(s)
   noteActivity()
   if (dropped && s !== 'idle' && s !== 'running') wake()
   invoke('ui_state', { code: UI_CODES[s] ?? 0 }).catch(() => {})
@@ -1517,32 +1512,34 @@ let ttsStartedAt = null, silenceTimer = null, rafVAD = null, speechOnsetAt = nul
 let ambientRMS = SPEECH_THRESHOLD * 0.5
 
 // Opening a Bluetooth headset's mic flips it into narrow-band "call" mode and
-// wrecks playback quality. When the default input is Bluetooth, the backend
-// returns the built-in mic's name and we capture from that instead; the
-// headset stays on high-quality output. null → just use the default input.
-async function builtinMicConstraint() {
-  try {
-    const name = await invoke('preferred_mic')
-    if (!name) return null
-    const devices = await navigator.mediaDevices.enumerateDevices()
-    const mic = devices.find((d) => d.kind === 'audioinput' && d.label === name)
-    if (!mic) console.warn('[vox] built-in mic "' + name + '" not found among', devices.map((d) => d.label))
-    return mic ? { exact: mic.deviceId } : null
-  } catch (err) {
-    console.warn('[vox] preferred_mic failed:', err)
-    return null
+// wrecks playback quality. While listening, the backend points the system
+// default input at the built-in mic (restored in deactivateVox), so the headset
+// stays on high-quality output — like the system dictation key.
+async function routeMic() {
+  try { await invoke('route_mic_away_from_bluetooth') } catch (err) {
+    console.warn('[vox] mic routing failed:', err)
   }
+}
+// Like the system dictation: everything else the Mac plays is silenced for the
+// whole time Vox is listening (mic open, until Vox talks), then fades back in.
+// Vox's own voice plays from the webview, so it must not be ducked.
+let othersDucked = false
+function syncDuck(s) {
+  const want = !!micStream && (s === 'active' || s === 'listening' || s === 'thinking')
+  if (want === othersDucked) return
+  othersDucked = want
+  invoke('duck_other_audio', { on: want }).catch(() => {})
+}
+function restoreMicRoute() {
+  invoke('restore_mic_route').catch(() => {})
 }
 
 async function activateVox() {
   if (micStream) return
   try {
-    const deviceId = await builtinMicConstraint()
+    await routeMic()
     micStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true, noiseSuppression: true, autoGainControl: true,
-        ...(deviceId ? { deviceId } : {}),
-      },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     })
     if (!audioCtx || audioCtx.state === 'closed') {
       audioCtx = new AudioContext({ sampleRate: 16000 })
@@ -1565,6 +1562,7 @@ async function activateVox() {
     vadTick()
   } catch (err) {
     console.error('[vox] activateVox failed:', err.message)
+    restoreMicRoute()
   }
 }
 
@@ -1583,6 +1581,7 @@ function deactivateVox() {
   micStream?.getTracks().forEach(t => t.stop())
   micStream = null
   audioCtx?.suspend()
+  restoreMicRoute()
   setState(agentCount > 0 ? 'running' : 'idle')
 }
 
@@ -1767,7 +1766,7 @@ function syncWindow(durOverride) {
   } else if (carouselOpen) {
     const cards = carouselEl.children.length
     w = 500
-    h = 56 + 22 + Math.min(Math.max(cards, 1), 4) * 45
+    h = 56 + 22 + 30 + Math.min(Math.max(cards, 1), 4) * 45  // +30: action row
   } else {
     ;[w, h] = SIZE_BASE
   }
@@ -1828,7 +1827,7 @@ function toggleCarousel() {
   noteActivity()
   if (carouselOpen) {
     closeCarousel(0)
-  } else if (carouselEl.children.length > 0) {
+  } else {
     openCarousel()
   }
 }

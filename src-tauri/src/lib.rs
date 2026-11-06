@@ -1306,6 +1306,8 @@ fn on_menu_event(app: &AppHandle, id: &str) {
 /// not run Drop on managed state, so without this the Python speech daemons
 /// and any running agents would be orphaned.
 fn shutdown(app: &AppHandle, state: &Arc<AppState>) {
+    audio_route::duck_other_audio(false);
+    audio_route::restore_mic_route();
     // Local only: agents running in Orca outlive Vox and must not be closed by it.
     agents::kill_local(app, state);
     if let Ok(mut g) = state.stt.lock() {
@@ -1394,7 +1396,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            audio_route::preferred_mic,
+            audio_route::route_mic_away_from_bluetooth,
+            audio_route::restore_mic_route,
+            audio_route::duck_other_audio,
             get_settings,
             set_settings,
             list_models,
