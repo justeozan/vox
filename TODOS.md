@@ -1,26 +1,5 @@
 # TODOS — Vox Voice Bar
 
-## Post-demo / v2
-
-### Project registry for switch_project()
-**What:** Configurable JSON file mapping project names to filesystem paths.
-**Why:** `switch_project("vox")` currently has no way to resolve a name to a cwd. Hardcoded for demo. A `~/.vox/projects.json` registry would make this real.
-**Context:** `activeProjectPath` in main.js is hardcoded for MVP. switch_project() should read from registry.
-**Where to start:** `main.js` switch_project tool handler + `~/.vox/projects.json` schema.
-**Depends on:** Nothing — independent of MVP scope.
-
-### Configurable agent timeout
-**What:** Make the 30s subprocess timeout configurable per-project or per-task type.
-**Why:** 30s is too short for real coding work (Codex finding). Demo uses it theatrically but real use needs 3-10 min.
-**Context:** `setTimeout(() => proc.kill(), 30000)` in main.js. Extract to a constant or config.
-**Depends on:** Project registry (above).
-
-### macOS packaging & entitlements
-**What:** Proper Electron packaging with NSMicrophoneUsageDescription, code signing, notarization.
-**Why:** Microphone access in a packaged .app requires entitlements — dev mode works without them.
-**Context:** Add to electron-builder config post-demo.
-**Depends on:** Working MVP.
-
 ## Post-migration Tauri (2026-07-18)
 
 ### Overlay fullscreen Spaces
@@ -31,3 +10,10 @@
 ### Code signing / notarization
 **What:** Le bundle Vox.app est non signé (ad-hoc). Gatekeeper acceptera en local, pas en distribution.
 **Where:** `tauri.conf.json > bundle > macOS` + certificat Developer ID.
+
+## Later (2026-10-29)
+- **Stable code signature for local builds.** Ad-hoc signing changes the code identity on every build, so macOS re-asks for the mic. A self-signed "Vox Dev" certificate in the keychain + `signingIdentity` would keep the permission.
+- **Orca agents have no deny list.** Voice-launched agents run as normal interactive Claude sessions in Orca (they ask permission), unlike the headless path's `--disallowedTools`.
+- **Agent count includes manually started Orca agents** (including the session you're coding in).
+- **Spoken "stop".** Only the `kill_agents` tool exists; no dedicated voice phrase.
+- **Tray icon as template image** so it adapts to light/dark menu bars.

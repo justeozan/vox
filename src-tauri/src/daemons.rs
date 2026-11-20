@@ -346,7 +346,7 @@ fn start_tts_engine(state: &Arc<AppState>, app: AppHandle, engine: &'static str)
         let app = app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(800));
-            crate::ade::speak_startup_brief(&app, &st);
+            crate::workspace::speak_startup_brief(&app, &st);
         });
     });
 

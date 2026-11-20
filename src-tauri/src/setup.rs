@@ -153,7 +153,7 @@ pub fn probe() -> Value {
 
     json!({
         "components": {
-            "python": comp(py.is_some(), &py.map(|p| p.display().to_string()).unwrap_or_else(|| need("brew install python@3.11"))),
+            "python": comp(py.is_some(), py.map(|p| p.display().to_string()).unwrap_or_else(|| need("brew install python@3.11"))),
             "ffmpeg": comp(ffmpeg, if ffmpeg { need("ok") } else { need("brew install ffmpeg") }),
             "espeakNg": comp(espeak, if espeak { need("ok") } else { need("brew install espeak-ng") }),
             "ollama": comp(ollama, if ollama { need("ok") } else { need("brew install ollama") }),

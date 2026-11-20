@@ -8,8 +8,8 @@
 //! every Ollama call, and multi-KB agent answers would poison a 3B's context
 //! within two agents.
 //!
-//! **The queue** is durable: announcements survive an ⌥Space interrupt and come
-//! back. One drainer thread owns all speaking, so N pending announcements cost N
+//! **The queue** is durable: announcements survive an ⌥Space interrupt but are
+//! parked, not re-spoken on their own (badge click replays them). One drainer thread owns all speaking, so N pending announcements cost N
 //! `VecDeque` entries rather than N parked OS threads.
 
 use std::collections::VecDeque;
@@ -39,6 +39,8 @@ const MAX_RESULTS: usize = 20;
 const RESULT_FRESH_SECS: u64 = 30 * 60;
 /// At most this many recent results are shown to the model.
 const RESULTS_IN_PROMPT: usize = 4;
+/// `not_before` of an announcement the user interrupted: never, until asked.
+const PARKED: u64 = u64::MAX;
 /// After this many interrupted attempts, stop trying to speak an item.
 const MAX_ATTEMPTS: u8 = 4;
 /// Suppress a repeat of the same key for this long after speaking it.
@@ -52,12 +54,14 @@ const CHARS_PER_SECOND: f32 = 14.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AnnounceKind {
-    /// An ADE session produced a new answer.
+    /// An Orca/Conductor session produced a new answer.
     Finished,
     Errored,
     NeedsInput,
     VoxAgentDone,
     VoxAgentFailed,
+    /// Hermes (the assistant) answered — see `hermes.rs`.
+    HermesReply,
 }
 
 impl AnnounceKind {
@@ -68,6 +72,7 @@ impl AnnounceKind {
             AnnounceKind::NeedsInput => "needs_input",
             AnnounceKind::VoxAgentDone => "agent_done",
             AnnounceKind::VoxAgentFailed => "agent_failed",
+            AnnounceKind::HermesReply => "hermes_reply",
         }
     }
     /// A blocked agent outranks a finished one — it's waiting on the user.
@@ -80,16 +85,16 @@ impl AnnounceKind {
 pub struct Announcement {
     pub id: u64,
     pub kind: AnnounceKind,
-    /// Dedup identity: "orca:<pane key>" | "conductor:<session id>" | "vox:<job id>".
+    /// Dedup identity: "conductor:<session id>" | "orca:<pane key>:<ms>" | "vox:<job id>".
     pub key: String,
-    /// MUST equal the ADE's own repo name — it's what the renderer matches to
-    /// highlight a carousel card.
+    /// MUST equal the repo name (Conductor's `repos.name`, Orca's repo name) —
+    /// it's what the renderer matches to highlight a carousel card.
     pub project: String,
     pub answer: String,
     pub original_ask: Option<String>,
     pub created_unix: u64,
     pub attempts: u8,
-    /// Earliest time this may be spoken (back-off after an interrupt).
+    /// Earliest time this may be spoken (`PARKED` after an interrupt).
     pub not_before: u64,
 }
 
@@ -316,7 +321,9 @@ pub fn start_drainer(app: AppHandle, state: Arc<AppState>) {
         {
             let (lock, cv) = &*state.announce_q;
             let mut q = lock.lock().unwrap();
-            while q.items.is_empty() {
+            // Wait for a READY item, not just any item: an interrupted one is
+            // parked (see `requeue`) and must not keep this loop spinning.
+            while !q.items.iter().any(|a| a.not_before <= now_unix()) {
                 let (g, _) = cv.wait_timeout(q, Duration::from_millis(400)).unwrap();
                 q = g;
             }
@@ -405,11 +412,14 @@ fn pop_batch(state: &Arc<AppState>) -> Vec<Announcement> {
     batch
 }
 
-/// An interrupted batch goes back to the FRONT, in order, with a growing
-/// back-off. Nothing is ever lost — but if the user keeps cutting it off, the
-/// voice gives up while the content stays answerable.
+/// An interrupted batch is PARKED, not re-spoken. ⌥Space means "stop talking":
+/// the old behaviour (back to the front with a 5–30 s back-off) made Vox start
+/// the same announcement again a few seconds after being cut off. Now the item
+/// stays in the queue with `not_before = PARKED`, so nothing speaks it on its
+/// own; it is still counted on the badge, and a click on the badge
+/// (`speak_now`) or a fresh answer from the same agent brings it back. The
+/// content also stays answerable via the result store.
 fn requeue(app: &AppHandle, state: &Arc<AppState>, batch: Vec<Announcement>) {
-    let now = now_unix();
     let count = {
         let (lock, cv) = &*state.announce_q;
         let mut q = lock.lock().unwrap();
@@ -419,7 +429,7 @@ fn requeue(app: &AppHandle, state: &Arc<AppState>, batch: Vec<Announcement>) {
                 println!("[vox] announcement {} interrupted {}x — memory only", a.key, a.attempts);
                 continue;
             }
-            a.not_before = now + (5 * a.attempts as u64).min(30);
+            a.not_before = PARKED;
             q.items.push_front(a);
         }
         cv.notify_all();
@@ -558,15 +568,18 @@ fn render(
         && cleaned.chars().count() <= max_chars
         && speech_secs(&cleaned) <= max_chars as f32 / CHARS_PER_SECOND;
     if verbatim_ok {
-        // Prefix so it doesn't sound like Vox's own opinion.
-        send(
-            if en {
-                format!("{} replied.", a.project)
-            } else {
-                format!("{} a répondu.", a.project)
-            },
-            &a.project,
-        );
+        // Prefix so it doesn't sound like Vox's own opinion. A Hermes reply's
+        // headline already says exactly that.
+        if a.kind != AnnounceKind::HermesReply {
+            send(
+                if en {
+                    format!("{} replied.", a.project)
+                } else {
+                    format!("{} a répondu.", a.project)
+                },
+                &a.project,
+            );
+        }
         for s in speech::split_sentences(&cleaned) {
             send(s, &a.project);
         }
@@ -575,8 +588,9 @@ fn render(
 
     // Summarize, streamed: the first sentence plays while the rest generates.
     let model = state.settings.lock().unwrap().model.clone();
-    let sys = summary_system(en);
-    let user = summary_user(en, &a.project, a.original_ask.as_deref(), &cleaned);
+    let hermes = a.kind == AnnounceKind::HermesReply;
+    let sys = if hermes { hermes_summary_system(en) } else { summary_system(en) };
+    let user = summary_user(en, &a.project, a.original_ask.as_deref(), &cleaned, hermes);
     let interrupted = || state.interrupt_gen.load(Ordering::SeqCst) != gen0;
     let mut sent = 0usize;
     crate::llm::chat_once_stream(&model, &sys, &user, 90, &interrupted, |s| {
@@ -593,7 +607,7 @@ fn render(
         // line — but only if it carries meaning. A snippet that is mostly the
         // "a code block" placeholder or a bare label ("Command:") is worse than
         // silence: the headline already said the true, useful thing.
-        let snip = crate::ade::clean_snippet(&cleaned);
+        let snip = crate::workspace::clean_snippet(&cleaned);
         let placeholder = if en { "a code block" } else { "un bloc de code" };
         let meat = snip.replace(placeholder, "");
         let words = meat.split_whitespace().filter(|w| w.chars().any(char::is_alphabetic)).count();
@@ -627,6 +641,8 @@ fn headline(a: &Announcement, en: bool) -> String {
         (AnnounceKind::Errored, true) => format!("Something errored on {p}."),
         (AnnounceKind::NeedsInput, false) => format!("{p} attend ta réponse."),
         (AnnounceKind::NeedsInput, true) => format!("{p} is waiting on you."),
+        (AnnounceKind::HermesReply, false) => format!("{p} a répondu."),
+        (AnnounceKind::HermesReply, true) => format!("{p} replied."),
     }
 }
 
@@ -692,14 +708,41 @@ fn summary_system(en: bool) -> String {
     }
 }
 
-fn summary_user(en: bool, project: &str, ask: Option<&str>, body: &str) -> String {
-    let ask = ask.unwrap_or("—");
-    // Head + tail: an agent's verdict is almost always at the end.
-    let body = head_tail(body, 4000, 2000);
+/// Same discipline as `summary_system` (describe, don't editorialise), but for
+/// a general assistant: what it ANSWERS, not what it CHANGED.
+fn hermes_summary_system(en: bool) -> String {
     if en {
-        format!("Project: {project}\nWhat was asked: \"{ask}\"\nAgent's final message:\n\"\"\"\n{body}\n\"\"\"\nOne sentence:")
+        "You are Vox. In ONE spoken sentence, say what an AI assistant just replied.\n\
+         - One sentence, 25 words maximum.\n\
+         - Report only what the message says. Invent nothing.\n\
+         - Speak about it in the third person (\"it says\", \"it suggests\").\n\
+         - No file paths, no code, no lists, no questions.\n\
+         - No preamble. Output the sentence and nothing else.\n\
+         Example message: \"The script is ready. Run it with python run.py and it will post twice a day.\"\n\
+         Example output: It says the script is ready and will post twice a day once you run it."
+            .into()
     } else {
-        format!("Projet : {project}\nCe qui était demandé : \"{ask}\"\nMessage final de l'agent :\n\"\"\"\n{body}\n\"\"\"\nUne phrase :")
+        "Tu es Vox. En UNE phrase orale, dis ce qu'un assistant IA vient de répondre.\n\
+         - Une phrase, 25 mots maximum.\n\
+         - Rapporte uniquement ce que le message dit. N'invente rien.\n\
+         - Parle de lui à la troisième personne (« il dit », « il propose »).\n\
+         - Aucun chemin de fichier, aucun code, aucune liste, aucune question.\n\
+         - Pas de préambule. Sors la phrase et rien d'autre.\n\
+         Exemple de message : « Le script est prêt. Lance-le avec python run.py et il postera deux fois par jour. »\n\
+         Exemple de sortie : Il dit que le script est prêt et postera deux fois par jour une fois lancé."
+            .into()
+    }
+}
+
+fn summary_user(en: bool, project: &str, ask: Option<&str>, body: &str, assistant: bool) -> String {
+    let ask = ask.unwrap_or("—");
+    // Head + tail: the verdict / next step is almost always at the end.
+    let body = head_tail(body, 4000, 2000);
+    match (en, assistant) {
+        (true, false) => format!("Project: {project}\nWhat was asked: \"{ask}\"\nAgent's final message:\n\"\"\"\n{body}\n\"\"\"\nOne sentence:"),
+        (false, false) => format!("Projet : {project}\nCe qui était demandé : \"{ask}\"\nMessage final de l'agent :\n\"\"\"\n{body}\n\"\"\"\nUne phrase :"),
+        (true, true) => format!("What the user said: \"{ask}\"\nThe assistant's reply:\n\"\"\"\n{body}\n\"\"\"\nOne sentence:"),
+        (false, true) => format!("Ce que l'utilisateur a dit : \"{ask}\"\nRéponse de l'assistant :\n\"\"\"\n{body}\n\"\"\"\nUne phrase :"),
     }
 }
 
@@ -798,6 +841,7 @@ mod tests {
             AnnounceKind::Errored,
             AnnounceKind::NeedsInput,
             AnnounceKind::Finished,
+            AnnounceKind::HermesReply,
         ] {
             for en in [true, false] {
                 for created in 0..3u64 {

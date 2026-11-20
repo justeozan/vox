@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::ade::{self, TargetCandidate};
+use crate::workspace::{self, TargetCandidate};
 use crate::AppState;
 
 /// A resolved place to run an agent.
@@ -21,7 +21,7 @@ pub struct Target {
     pub path: String,
     pub source: TargetSource,
     pub confidence: MatchKind,
-    /// An agent is already `working` in this exact worktree.
+    /// An Orca/Conductor agent is already `working` in this exact worktree.
     pub live_session: bool,
 }
 
@@ -246,7 +246,7 @@ pub fn resolve_target(state: &Arc<AppState>, name: &str) -> Resolution {
         }
     }
 
-    let cat = ade::catalog();
+    let cat = workspace::catalog();
 
     // Tier 0.5 — aliases, then re-enter the exact tiers under the canonical name.
     let mut needle = needle;
@@ -353,7 +353,7 @@ fn exact_tiers(
     }
 
     // Tier 3 — the ~/.vox/projects.json registry. Last of the exact tiers: it
-    // auto-creates itself with one entry and then goes stale, while the ADE's
+    // auto-creates itself with one entry and then goes stale, while Conductor's
     // answer is a real isolated worktree.
     for (rname, rpath) in crate::load_registry() {
         if normalize(&rname) != needle {
@@ -401,7 +401,7 @@ pub fn ask_which(en: bool, options: &[String]) -> String {
 /// A dead end is a wasted turn; naming real targets turns it into a menu, and
 /// it's how the user discovers their own repo list by voice.
 pub fn unknown_line(en: bool, needle: &str) -> String {
-    let names = ade::launchable_names(3).join(", ");
+    let names = workspace::launchable_names(3).join(", ");
     match (en, names.is_empty()) {
         (true, true) => format!("I can't find \"{needle}\"."),
         (true, false) => format!("I can't find \"{needle}\". I have {names}…"),
@@ -414,37 +414,29 @@ pub fn unknown_line(en: bool, needle: &str) -> String {
 mod tests {
     use super::*;
 
-    /// `ts` is epoch millis, as every backend now reports it — a plain number
-    /// that cannot sort against itself the way Conductor's two clashing
-    /// timestamp STRING formats used to.
-    fn cand(name: &str, kind: &'static str, repo: &str, ts: u64) -> TargetCandidate {
+    fn cand(name: &str, kind: &'static str, repo: &str, ts: &str) -> TargetCandidate {
         TargetCandidate {
             name: name.into(),
             kind,
             repo: repo.into(),
             path: "/tmp".into(),
             branch: String::new(),
-            ts,
+            ts: ts.into(),
             live: false,
         }
     }
 
-    /// Minutes past a fixed instant, so the fixture still reads like wall-clock.
-    fn at(minutes: u64) -> u64 {
-        1_786_406_400_000 + minutes * 60_000
-    }
-
     fn fixture() -> Vec<TargetCandidate> {
         vec![
-            cand("vox", "repo", "vox", at(240)),
-            cand("orivo", "repo", "orivo", at(180)),
-            cand("Cardex", "repo", "Cardex", at(120)),
-            cand("oneiby", "repo", "oneiby", at(60)),
-            cand("tribos-landing-page", "repo", "tribos-landing-page", at(0)),
-            cand("marseille", "worktree", "vox", at(262)),
-            cand("porto", "worktree", "orivo", at(256)),
-            cand("hat-yai", "worktree", "orivo", at(172)),
-            cand("hat-yai", "worktree", "Cardex", at(140)),
+            cand("vox", "repo", "vox", "2026-08-06 20:00:00"),
+            cand("orivo", "repo", "orivo", "2026-08-06 19:00:00"),
+            cand("Cardex", "repo", "Cardex", "2026-08-06 18:00:00"),
+            cand("oneiby", "repo", "oneiby", "2026-08-06 17:00:00"),
+            cand("tribos-landing-page", "repo", "tribos-landing-page", "2026-08-06 16:00:00"),
+            cand("marseille", "worktree", "vox", "2026-08-06 20:22:00"),
+            cand("porto", "worktree", "orivo", "2026-08-06 20:16:00"),
+            cand("hat-yai", "worktree", "orivo", "2026-08-06 18:52:00"),
+            cand("hat-yai", "worktree", "Cardex", "2026-08-06 18:20:00"),
         ]
     }
 
@@ -538,21 +530,21 @@ mod tests {
         assert_eq!(newest(&wt).unwrap().name, "marseille");
     }
 
-    /// Hits whichever ADE is actually installed — run explicitly with
+    /// Hits the real backend (Orca CLI or Conductor DB) — run explicitly with
     /// `cargo test -- --ignored --nocapture live_catalog`.
     #[test]
     #[ignore]
     fn live_catalog() {
-        let cat = ade::catalog();
+        let cat = workspace::catalog();
         println!("{} launchable targets", cat.len());
         for c in &cat {
             println!("  {:9} {:24} repo={:22} live={} {}", c.kind, c.name, c.repo, c.live, c.path);
         }
-        assert!(!cat.is_empty(), "no targets — is an ADE running?");
+        assert!(!cat.is_empty(), "no targets — is the backend installed and running?");
         assert!(
             cat.iter().all(|c| Path::new(&c.path).exists()),
             "every candidate path must exist"
         );
-        println!("\nlaunchable_names(24): {:?}", ade::launchable_names(24));
+        println!("\nlaunchable_names(24): {:?}", workspace::launchable_names(24));
     }
 }
