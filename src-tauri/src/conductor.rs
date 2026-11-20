@@ -1,61 +1,44 @@
-//! Conductor workspace state — queries the app's SQLite DB read-only via the
-//! system `sqlite3` CLI (no bundled sqlite dep), then builds the startup-brief
-//! sentences: deterministic per-worktree lines (varied phrasing, quiet repos
-//! grouped) streamed into a speech session, followed by an LLM recommendation
-//! grounded in each worktree's ORIGINAL ask.
+//! Conductor backend — worktree state read out of the app's own SQLite file.
+//!
+//! Kept because Conductor has no API: there is no CLI, no socket and no
+//! documented schema, so the only way in is `sqlite3 -readonly` against the
+//! app's private database and a set of guesses about what its columns mean.
+//! Vox never writes to it.
+//!
+//! Three workarounds live here and nowhere else, which is the clearest argument
+//! for the Orca backend being the default:
+//!
+//!  * `sessions.unread_count` is 0 on every row Conductor writes, so the "this
+//!    agent is done" signal has to be reconstructed from message timestamps;
+//!  * `updated_at` is written in TWO formats — ISO from the app, space-separated
+//!    from its own SQL triggers — which sort against each other incorrectly;
+//!  * an assistant message is a JSON envelope whose shape depends on the agent,
+//!    so getting one line of text out means unwrapping three possible layouts.
+//!
+//! Orca answers all three directly. See `orca.rs`.
 
 use std::process::Command;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use regex::Regex;
-use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
+use serde_json::Value;
 
-use crate::speech::SpeechItem;
-use crate::{home, AppState};
+use crate::ade::{AgentState, SessionInfo, Snapshot, TargetCandidate, Workspace};
+use crate::home;
 
-pub struct SessionInfo {
-    pub agent: String,
-    pub status: String,
-    pub unread_count: i64,
-    /// ISO timestamp of the last assistant message, for freshness checks.
-    pub last_activity: Option<String>,
-    pub preview: Option<String>,
-    /// The user's first message in the session — what this worktree was
-    /// originally asked to do. Grounds progress advice.
-    pub original_ask: Option<String>,
+/// An idle agent counts as "just finished" only if it said something inside this
+/// window. Without it, a worktree whose agent went quiet on Tuesday would be
+/// announced as freshly finished at every launch.
+const FRESH_MS: u64 = 12 * 3600 * 1000;
+
+fn db_path() -> std::path::PathBuf {
+    home().join("Library/Application Support/com.conductor.app/conductor.db")
 }
 
-pub struct Workspace {
-    pub project: String,
-    pub branch: String,
-    pub path: String,
-    pub session: Option<SessionInfo>,
-}
-
-/// One thing an agent can be launched on: a Conductor worktree, or a repo's
-/// main checkout. Deliberately wider than `read_state` — that one only surfaces
-/// `in-progress` worktrees, which is the right filter for "what's going on"
-/// but far too narrow for "where can I send an agent".
-#[derive(Clone, Debug)]
-pub struct TargetCandidate {
-    /// Spoken/typed name: the worktree codename, or the repo name.
-    pub name: String,
-    /// "worktree" | "repo"
-    pub kind: &'static str,
-    pub repo: String,
-    pub path: String,
-    pub branch: String,
-    /// Normalized timestamp, safe to compare as a string. See `ts_key`.
-    pub ts: String,
-    /// A Conductor UI session is `working` in this exact worktree right now.
-    pub live: bool,
+pub fn installed() -> bool {
+    db_path().exists()
 }
 
 fn sql(query: &str) -> Vec<Value> {
-    let db = home().join("Library/Application Support/com.conductor.app/conductor.db");
+    let db = db_path();
     if !db.exists() {
         return vec![];
     }
@@ -66,11 +49,6 @@ fn sql(query: &str) -> Vec<Value> {
         Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).unwrap_or_default(),
         _ => vec![],
     }
-}
-
-/// Run a read-only query for another module (the watcher builds its own).
-pub fn sql_public(query: &str) -> Vec<Value> {
-    sql(query)
 }
 
 fn s(v: &Value, key: &str) -> String {
@@ -84,15 +62,43 @@ fn s(v: &Value, key: &str) -> String {
 /// `datetime('now')` (`2026-08-06 18:27:10`). Sorting the raw column is
 /// lexicographic, and 'T' (0x54) > ' ' (0x20), so EVERY trigger-written row
 /// sinks below every app-written one regardless of time — off by up to a full
-/// day. That silently corrupts both "most recent worktree wins" tie-breaks and
-/// which worktrees the model is even shown. Normalizing the separator and
-/// dropping the sub-second tail makes both formats compare correctly.
+/// day. Normalizing the separator and dropping the sub-second tail makes both
+/// formats compare correctly in SQL; `iso_to_millis` then does the same job in
+/// Rust, which is what the rest of the crate actually compares.
 fn ts_key(col: &str) -> String {
     format!("substr(replace({col},'T',' '),1,19)")
 }
 
-// Assistant messages are JSON envelopes that differ by agent type — extract
-// the last human-meaningful text.
+/// Either of Conductor's timestamp formats → epoch millis. 0 when unparseable.
+///
+/// Parsing at the boundary is the real fix for the sort bug above: downstream
+/// code compares numbers, so neither format can outrank the other by accident.
+fn iso_to_millis(raw: &str) -> u64 {
+    let b = raw.as_bytes();
+    if b.len() < 19 {
+        return 0;
+    }
+    let num = |a: usize, z: usize| raw.get(a..z).and_then(|t| t.parse::<i64>().ok()).unwrap_or(0);
+    let (y, m, d) = (num(0, 4), num(5, 7), num(8, 10));
+    let (h, mi, sec) = (num(11, 13), num(14, 16), num(17, 19));
+    if y == 0 || m == 0 || d == 0 {
+        return 0;
+    }
+    // days_from_civil — Howard Hinnant's algorithm, the inverse of the formatter
+    // this crate used to carry. No chrono dependency.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let frac = if b.len() > 22 && b[19] == b'.' { num(20, 23) } else { 0 };
+    ((days * 86_400 + h * 3600 + mi * 60 + sec) * 1000 + frac).max(0) as u64
+}
+
+// Assistant messages are JSON envelopes that differ by agent type — extract the
+// last human-meaningful text.
 fn extract_last_assistant_text(raw: &str) -> Option<String> {
     match serde_json::from_str::<Value>(raw) {
         Ok(obj) => {
@@ -145,40 +151,20 @@ pub fn last_assistant_message(session_id: &str) -> Option<String> {
 
 /// The newest human-meaningful assistant text AND when it was sent.
 ///
-/// The timestamp is what tells "this agent just finished" apart from "this
-/// agent has been idle since Tuesday". Conductor's own `unread_count` flag
-/// would be the natural signal, but it is 0 on every row in practice — which
-/// is why the recap's "agent is done" line never fired.
-pub fn last_assistant_entry(session_id: &str) -> Option<(String, String)> {
+/// The timestamp is what tells "this agent just finished" apart from "this agent
+/// has been idle since Tuesday". Conductor's own `unread_count` flag would be
+/// the natural signal, but it is 0 on every row in practice — which is why the
+/// recap's "agent is done" line never fired.
+fn last_assistant_entry(session_id: &str) -> Option<(String, u64)> {
     let rows = sql(&format!(
         "SELECT content, sent_at FROM session_messages \
          WHERE session_id='{session_id}' AND role='assistant' \
          ORDER BY sent_at DESC LIMIT 40;"
     ));
     rows.iter().find_map(|row| {
-        extract_last_assistant_text(&s(row, "content")).map(|t| (t, s(row, "sent_at")))
+        extract_last_assistant_text(&s(row, "content"))
+            .map(|t| (t, iso_to_millis(&s(row, "sent_at"))))
     })
-}
-
-/// An idle agent counts as "just finished" only if it actually said something
-/// recently.
-///
-/// This replaces a check on `unread_count > 0`, which reads correctly but is
-/// dead: that column is 0 on every session row Conductor writes, so the recap's
-/// "the agent on X is done" line could never fire and finished worktrees were
-/// folded into the "nothing new" group instead. Without the freshness window,
-/// though, a worktree whose agent went idle on Tuesday would be announced as
-/// freshly finished at every launch.
-fn finished_recently(sess: &SessionInfo) -> bool {
-    const FRESH_SECS: u64 = 12 * 3600;
-    let Some(at) = sess.last_activity.as_deref() else { return false };
-    if sess.preview.as_deref().map(|p| p.trim().is_empty()).unwrap_or(true) {
-        return false;
-    }
-    // `sent_at` is uniformly ISO-Z, so a prefix comparison against a computed
-    // cutoff is both correct and dependency-free.
-    let cutoff = crate::watch::iso_at(crate::now_unix().saturating_sub(FRESH_SECS));
-    at > cutoff.as_str()
 }
 
 /// The session's original ask: first meaningful user message.
@@ -200,7 +186,7 @@ pub fn first_user_message(session_id: &str) -> Option<String> {
                 .unwrap_or_else(|| raw.clone()),
             Err(_) => raw.clone(),
         };
-        let t = clean_snippet(&text);
+        let t = crate::ade::clean_snippet(&text);
         if t.chars().count() > 3 {
             Some(t.chars().take(150).collect())
         } else {
@@ -209,7 +195,29 @@ pub fn first_user_message(session_id: &str) -> Option<String> {
     })
 }
 
-pub fn read_state(max_items: usize) -> Vec<Workspace> {
+/// Conductor's status vocabulary → Vox's.
+///
+/// `idle` is the lossy one: Conductor reports it whether the agent finished a
+/// moment ago or last week, so the caller promotes a FRESH idle to `Done` from
+/// the message watermark. Orca just says `done`.
+fn agent_state(status: &str, fresh_answer: bool) -> AgentState {
+    match status {
+        "working" => AgentState::Working,
+        "error" => AgentState::Errored,
+        // Conductor's real status set includes 'waiting' — agent blocked on user
+        // input or a permission prompt, the OPPOSITE of quiet.
+        "waiting" => AgentState::Blocked,
+        "idle" if fresh_answer => AgentState::Done,
+        _ => AgentState::Idle,
+    }
+}
+
+// ── Reads ────────────────────────────────────────────────────────────────────
+
+pub fn read_state(max_items: usize) -> Option<Vec<Workspace>> {
+    if !installed() {
+        return None;
+    }
     let workspaces = sql(&format!(
         "SELECT w.id, w.branch, w.workspace_name, w.workspace_path, r.name AS project_name, \
            (SELECT s.id FROM sessions s \
@@ -222,36 +230,51 @@ pub fn read_state(max_items: usize) -> Vec<Workspace> {
          ORDER BY {TS} DESC LIMIT {max_items};",
         TS = ts_key("w.updated_at")
     ));
+    if workspaces.is_empty() {
+        // `sqlite3 -readonly` cannot recover a stale WAL, so this is also what
+        // "Conductor is closed" looks like. Reporting no answer lets the
+        // dispatcher try the other backend instead of claiming an empty world.
+        return None;
+    }
 
-    workspaces
-        .iter()
-        .map(|w| {
-            let session_id = s(w, "session_id");
-            let session = if session_id.is_empty() {
-                None
-            } else {
-                let entry = last_assistant_entry(&session_id);
-                sql(&format!(
-                    "SELECT id, status, agent_type, unread_count FROM sessions WHERE id='{session_id}';"
-                ))
-                .first()
-                .map(|row| SessionInfo {
-                    agent: s(row, "agent_type"),
-                    status: s(row, "status"),
-                    unread_count: row.get("unread_count").and_then(|v| v.as_i64()).unwrap_or(0),
-                    last_activity: entry.as_ref().map(|(_, at)| at.clone()),
-                    preview: entry.as_ref().map(|(t, _)| t.clone()),
-                    original_ask: first_user_message(&session_id),
-                })
-            };
-            Workspace {
-                project: s(w, "project_name"),
-                branch: s(w, "branch"),
-                path: s(w, "workspace_path"),
-                session,
-            }
-        })
-        .collect()
+    Some(
+        workspaces
+            .iter()
+            .map(|w| {
+                let session_id = s(w, "session_id");
+                let session = if session_id.is_empty() {
+                    None
+                } else {
+                    let entry = last_assistant_entry(&session_id);
+                    let fresh = entry
+                        .as_ref()
+                        .map(|(text, at)| {
+                            !text.trim().is_empty()
+                                && *at > crate::now_unix().saturating_mul(1000).saturating_sub(FRESH_MS)
+                        })
+                        .unwrap_or(false);
+                    sql(&format!(
+                        "SELECT id, status, agent_type, unread_count FROM sessions WHERE id='{session_id}';"
+                    ))
+                    .first()
+                    .map(|row| SessionInfo {
+                        agent: s(row, "agent_type"),
+                        state: agent_state(&s(row, "status"), fresh),
+                        last_activity: entry.as_ref().map(|(_, at)| *at),
+                        preview: entry.as_ref().map(|(t, _)| t.clone()),
+                        original_ask: first_user_message(&session_id),
+                        unread: row.get("unread_count").and_then(|v| v.as_i64()).unwrap_or(0) > 0,
+                    })
+                };
+                Workspace {
+                    project: s(w, "project_name"),
+                    branch: s(w, "branch"),
+                    path: s(w, "workspace_path"),
+                    session,
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Every launchable target, most recently touched first.
@@ -260,11 +283,14 @@ pub fn read_state(max_items: usize) -> Vec<Workspace> {
 /// in Rust (see `targets`), which both removes the string-interpolation
 /// injection surface and makes fuzzy matching possible.
 ///
-/// Deliberately does NOT filter on `derived_status`: a worktree that Conductor
-/// marks `done` or `in-review` is still a perfectly good place to send an
-/// agent, and excluding those is exactly why most of the user's repos used to
-/// be unreachable by voice.
-pub fn catalog() -> Vec<TargetCandidate> {
+/// Deliberately does NOT filter on `derived_status`: a worktree Conductor marks
+/// `done` or `in-review` is still a perfectly good place to send an agent, and
+/// excluding those is exactly why most of the user's repos used to be
+/// unreachable by voice.
+pub fn catalog() -> Option<Vec<TargetCandidate>> {
+    if !installed() {
+        return None;
+    }
     let rows = sql(&format!(
         "SELECT COALESCE(NULLIF(w.workspace_name,''), w.directory_name) AS name, \
                 'worktree' AS kind, COALESCE(r.name,'') AS repo, \
@@ -285,323 +311,143 @@ pub fn catalog() -> Vec<TargetCandidate> {
         TSW = ts_key("w.updated_at"),
         TSR = ts_key("r.updated_at"),
     ));
-
-    rows.iter()
-        .map(|r| TargetCandidate {
-            name: s(r, "name"),
-            kind: if s(r, "kind") == "repo" { "repo" } else { "worktree" },
-            repo: s(r, "repo"),
-            path: s(r, "path"),
-            branch: s(r, "branch"),
-            ts: s(r, "ts"),
-            live: r.get("live").and_then(|v| v.as_i64()).unwrap_or(0) > 0,
-        })
-        // A row whose directory is gone would send an agent nowhere.
-        .filter(|c| {
-            !c.name.is_empty() && !c.path.is_empty() && std::path::Path::new(&c.path).exists()
-        })
-        .collect()
-}
-
-/// Names the model may target, repos first (that's what people actually say),
-/// then worktree codenames. Deduped case-insensitively and capped — this goes
-/// into every system prompt, so it has to stay a single short line.
-pub fn launchable_names(max: usize) -> Vec<String> {
-    let cat = catalog();
-    let mut out: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for want_repo in [true, false] {
-        for c in &cat {
-            if (c.kind == "repo") != want_repo {
-                continue;
-            }
-            let key = c.name.to_lowercase();
-            if seen.insert(key) {
-                out.push(c.name.clone());
-            }
-            if out.len() >= max {
-                return out;
-            }
-        }
-    }
-    out
-}
-
-// ── Snippet cleaning (port of cleanActivitySnippet) ──────────────────────────
-
-pub fn clean_snippet(raw: &str) -> String {
-    let mut t = raw.to_string();
-    for (pat, repl) in [
-        (r"(?s)```.*?```", ""),
-        (r"`[^`\n]+`", ""),
-        (r"\*{1,3}([^*\n]+)\*{1,3}", "$1"),
-        (r"_{1,2}([^_\n]+)_{1,2}", "$1"),
-        (r"(?m)^#{1,6}\s+", ""),
-        (r"[|#]", ""),
-        (r"\s+", " "),
-    ] {
-        t = Regex::new(pat).unwrap().replace_all(&t, repl).to_string();
-    }
-    let t = t.trim();
-    // Keep only the first complete sentence
-    if let Some(m) = Regex::new(r"^(.{10,120}?[.!?])").unwrap().captures(t) {
-        return m[1].trim().to_string();
-    }
-    t.chars().take(80).collect::<String>().trim().to_string()
-}
-
-// ── Brief sentences — varied phrasing, quiet repos grouped ───────────────────
-
-fn join_names(names: &[String], en: bool) -> String {
-    let and = if en { "and" } else { "et" };
-    match names.len() {
-        0 => String::new(),
-        1 => names[0].clone(),
-        2 => format!("{} {and} {}", names[0], names[1]),
-        _ if names.len() <= 4 => {
-            let (head, last) = names.split_at(names.len() - 1);
-            format!("{} {and} {}", head.join(", "), last[0])
-        }
-        n => {
-            let others = if en { "others" } else { "autres" };
-            format!("{}, {} {and} {} {others}", names[0], names[1], n - 2)
-        }
-    }
-}
-
-/// Build the deterministic recap sentences, each tagged with the workspace it
-/// talks about. `seed` rotates the phrasing between runs so consecutive
-/// recaps don't sound copy-pasted; quiet worktrees collapse into ONE sentence.
-fn build_brief_sentences(ws: &[Workspace], en: bool, seed: usize) -> Vec<(String, Option<String>)> {
-    let mut out: Vec<(String, Option<String>)> = Vec::new();
-    let mut quiet: Vec<String> = Vec::new();
-
-    for (i, w) in ws.iter().enumerate() {
-        let Some(sess) = w.session.as_ref() else { continue };
-        let p = &w.project;
-        let a = &sess.agent;
-        let raw_preview = sess.preview.as_deref().unwrap_or("");
-        let preview = clean_snippet(raw_preview);
-        // Detect questions on the RAW preview: clean_snippet keeps only the
-        // first sentence, which drops the trailing "…anything else?" that the
-        // "summary. Question?" agent pattern ends with.
-        let looks_like_question = raw_preview.trim_end().ends_with('?')
-            || Regex::new(r"(?i)\b(peux|veux|est-ce|c'est quoi|comment|dois-je|can|should|which|what)\b")
-                .unwrap()
-                .is_match(&preview);
-        let v = seed + i;
-
-        let sentence = match sess.status.as_str() {
-            "working" => Some(match v % 3 {
-                0 if en => format!("Agent {a} is still working on {p}."),
-                1 if en => format!("{p}: agent {a} is on it right now."),
-                _ if en => format!("Work is moving on {p} with agent {a}."),
-                0 => format!("L'agent {a} bosse encore sur {p}."),
-                1 => format!("{p} : l'agent {a} est toujours au travail."),
-                _ => format!("Ça avance sur {p}, l'agent {a} est dessus."),
-            }),
-            "error" => {
-                let detail = Regex::new(r"^\[erreur\]\s*")
-                    .unwrap()
-                    .replace(&preview, "")
-                    .to_string();
-                Some(match v % 3 {
-                    0 if en => format!("There's an error on {p}."),
-                    1 if en => format!("Heads up — {p} errored out."),
-                    _ if en => format!("{p} hit a problem."),
-                    0 => {
-                        let d = if detail.is_empty() { "agent en échec".into() } else { detail };
-                        format!("Il y a une erreur sur {p}, {d}.")
-                    }
-                    1 => format!("Attention, {p} est en erreur."),
-                    _ => format!("{p} a un souci, jette un œil."),
-                })
-            }
-            "idle" => {
-                if looks_like_question && !preview.is_empty() {
-                    Some(match v % 3 {
-                        0 if en => format!("{p} is waiting for your answer."),
-                        1 if en => format!("The agent on {p} asked you something."),
-                        _ if en => format!("There's a pending question on {p}."),
-                        0 => format!("{p} attend ta réponse : {preview}"),
-                        1 => format!("L'agent de {p} te pose une question : {preview}"),
-                        _ => format!("Question en attente sur {p} : {preview}"),
-                    })
-                } else if finished_recently(sess) {
-                    Some(match v % 3 {
-                        0 if en => format!("The agent on {p} is done — you'll need to test it."),
-                        1 if en => format!("{p} is ready for you to try."),
-                        _ if en => format!("{p} finished; give it a quick test."),
-                        0 => format!("L'agent sur {p} a terminé, il te faudra tester."),
-                        1 => format!("{p} est prêt, à tester quand tu veux."),
-                        _ => format!("C'est terminé sur {p}, un petit test s'impose."),
-                    })
-                } else {
-                    // Nothing actionable — collapse into the grouped sentence.
-                    quiet.push(p.clone());
-                    None
-                }
-            }
-            // Conductor's real status set includes 'waiting' (agent blocked
-            // on user input/permission) — the OPPOSITE of quiet.
-            "waiting" => Some(match v % 3 {
-                0 if en => format!("{p} is waiting on you to continue."),
-                1 if en => format!("The agent on {p} is blocked, waiting for your input."),
-                _ if en => format!("{p} needs you before it can move on."),
-                0 => format!("{p} attend ton feu vert pour continuer."),
-                1 => format!("L'agent sur {p} est bloqué, il attend ta réponse."),
-                _ => format!("{p} a besoin de toi pour avancer."),
-            }),
-            // Unknown status: say nothing rather than wrongly claim all-quiet.
-            _ => None,
-        };
-        if let Some(text) = sentence {
-            out.push((text, Some(p.clone())));
-        }
+    if rows.is_empty() {
+        return None;
     }
 
-    if !quiet.is_empty() {
-        let list = join_names(&quiet, en);
-        let text = match seed % 3 {
-            0 if en => format!("Nothing new on {list}."),
-            1 if en => format!("All quiet on {list}."),
-            _ if en => format!("{list}: nothing to report."),
-            0 => format!("Rien de nouveau sur {list}."),
-            1 => format!("Toujours calme côté {list}."),
-            _ => format!("{list} : rien à signaler."),
-        };
-        // Tag with the first quiet project so the carousel still tracks.
-        out.push((text, quiet.first().cloned()));
-    }
-
-    out
-}
-
-// ── Startup brief ────────────────────────────────────────────────────────────
-
-/// Returns true if a recap was actually spoken (false: already done, no
-/// workspaces, nothing to say, or aborted before speech).
-pub fn speak_startup_brief(app: &AppHandle, state: &Arc<AppState>) -> bool {
-    if state.startup_brief_done.swap(true, Ordering::SeqCst) {
-        return false;
-    }
-    // Generation-based cancellation: any ⌥Space/barge-in AFTER this point
-    // kills the brief for good — nothing can re-arm it (the old bool flag
-    // could be cleared by the next voice turn, resurrecting killed advice).
-    let gen0 = state.interrupt_gen.load(Ordering::SeqCst);
-
-    let en = state.settings.lock().unwrap().language == "en";
-
-    let ws = read_state(10);
-    if ws.is_empty() {
-        return false;
-    }
-    let seed = (SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0) / 60) as usize;
-    let sentences = build_brief_sentences(&ws, en, seed);
-    if sentences.is_empty() {
-        return false;
-    }
-
-    // Carousel cards for the renderer — sent before anything is spoken.
-    let cards: Vec<Value> = ws
-        .iter()
-        .map(|w| {
-            json!({
-                "project": w.project,
-                "branch": w.branch,
-                "agent": w.session.as_ref().map(|s| s.agent.clone()).unwrap_or_default(),
-                "status": w.session.as_ref().map(|s| s.status.clone()).unwrap_or_else(|| "none".into()),
-                "unread": w.session.as_ref().map(|s| s.unread_count).unwrap_or(0),
-                "preview": w.session.as_ref().and_then(|s| s.preview.as_deref()).map(clean_snippet).unwrap_or_default(),
+    Some(
+        rows.iter()
+            .map(|r| TargetCandidate {
+                name: s(r, "name"),
+                kind: if s(r, "kind") == "repo" { "repo" } else { "worktree" },
+                repo: s(r, "repo"),
+                path: s(r, "path"),
+                branch: s(r, "branch"),
+                ts: iso_to_millis(&s(r, "ts")),
+                live: r.get("live").and_then(|v| v.as_i64()).unwrap_or(0) > 0,
             })
-        })
-        .collect();
-    let _ = app.emit("workspaces-data", json!(cards));
+            // A row whose directory is gone would send an agent nowhere.
+            .filter(|c| {
+                !c.name.is_empty() && !c.path.is_empty() && std::path::Path::new(&c.path).exists()
+            })
+            .collect(),
+    )
+}
 
-    // Violet "awakening" visual immediately — speech streams in behind it.
-    let _ = app.emit("startup-brief-starting", ());
-
-    let interrupted = || state.interrupt_gen.load(Ordering::SeqCst) != gen0;
-    if interrupted() {
-        let _ = app.emit("speaking-done", ());
-        return false;
+/// One watcher tick. Deliberately NOT filtered on `derived_status`: a workspace
+/// flips to `done` at the very moment its agent finishes, so filtering to
+/// `in-progress` would drop exactly the rows the watcher exists to notice.
+/// (Measured on a real DB: 7 of 13 live sessions sit in `done` workspaces.)
+pub fn poll(limit: usize) -> Option<Vec<Snapshot>> {
+    if !installed() {
+        return None;
+    }
+    let rows = sql(&format!(
+        "SELECT s.id AS sid, s.status AS status, s.unread_count AS unread, \
+                w.directory_name AS dir, w.workspace_path AS path, \
+                COALESCE(w.branch,'') AS branch, \
+                s.agent_type AS agent, COALESCE(r.name,'') AS project, \
+                (SELECT max(m.sent_at) FROM session_messages m \
+                   WHERE m.session_id = s.id AND m.role = 'assistant') AS last_asst \
+           FROM sessions s JOIN workspaces w ON s.workspace_id = w.id \
+           LEFT JOIN repos r ON w.repository_id = r.id \
+          WHERE s.is_hidden = 0 AND w.state = 'ready' \
+            AND (r.hidden IS NULL OR r.hidden = 0) \
+          ORDER BY {TS} DESC LIMIT {limit};",
+        TS = ts_key("s.updated_at")
+    ));
+    if rows.is_empty() {
+        return None;
     }
 
-    // Everything below streams into one speech session: the deterministic
-    // sentences start playing right away while the LLM writes its advice.
-    let session = crate::speech::start_session(app.clone(), state.clone());
-
-    let intro = match seed % 3 {
-        0 if en => "Hey, here's the recap.",
-        1 if en => "Quick status round-up.",
-        _ if en => "Here's where things stand.",
-        0 => "Bonjour, voici le récap.",
-        1 => "Salut ! Petit point sur tes worktrees.",
-        _ => "C'est parti pour le récap.",
-    };
-    let _ = session.send(SpeechItem::Sentence { text: intro.into(), workspace: None });
-
-    for (text, workspace) in sentences {
-        if interrupted() {
-            break;
-        }
-        let _ = session.send(SpeechItem::Sentence { text, workspace });
-    }
-
-    // LLM advice grounded in each worktree's original ask — streamed sentence
-    // by sentence into the same session while earlier lines are being spoken.
-    if !interrupted() {
-        let model = state.settings.lock().unwrap().model.clone();
-        let feed = ws
-            .iter()
-            .filter_map(|w| {
-                let sess = w.session.as_ref()?;
-                let ask = sess.original_ask.as_deref().unwrap_or("?");
-                let last = sess.preview.as_deref().map(clean_snippet).unwrap_or_default();
-                let unread = if sess.unread_count > 0 {
-                    if en { ", unread" } else { ", non lu" }
-                } else {
-                    ""
+    Some(
+        rows.iter()
+            .filter(|r| !s(r, "sid").is_empty())
+            .map(|r| {
+                let watermark = iso_to_millis(&s(r, "last_asst"));
+                let project = match s(r, "project") {
+                    p if p.is_empty() => s(r, "dir"),
+                    p => p,
                 };
-                Some(format!(
-                    "- {} ({}{unread}) | {} \"{ask}\" | {} \"{last}\"",
-                    w.project,
-                    sess.status,
-                    if en { "asked:" } else { "demande :" },
-                    if en { "last:" } else { "dernier :" },
-                ))
+                Snapshot {
+                    key: s(r, "sid"),
+                    // A fresh watermark is what promotes `idle` to `Done`; the
+                    // watcher's own "did the watermark advance" test supplies
+                    // the recency, so `true` here is not a claim of freshness.
+                    state: agent_state(&s(r, "status"), watermark > 0),
+                    watermark,
+                    project,
+                    path: s(r, "path"),
+                    branch: s(r, "branch"),
+                    agent: s(r, "agent"),
+                    // Fetching bodies costs a query per row; the watcher asks
+                    // for them only on the one session it decides to announce.
+                    answer: None,
+                    original_ask: None,
+                }
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect(),
+    )
+}
 
-        let system = if en {
-            "You are Vox, spoken English. From the data: 1) Recommend WHICH worktree to handle first and why, one short sentence. \
-             2) If a finished worktree seems to satisfy its original ask, propose the next step in one sentence starting with \"I can prompt <project> to …\". \
-             Max 3 short sentences total. Never invent a project not in the list."
-        } else {
-            "Tu es Vox, français oral. À partir des données : 1) Recommande LE worktree à traiter en premier et pourquoi, une phrase courte. \
-             2) Si un worktree terminé semble répondre à sa demande initiale, propose la suite en une phrase commençant par « Je peux prompter <projet> pour … ». \
-             Maximum 3 phrases courtes au total. N'invente aucun projet hors liste."
-        };
-        let user = if en {
-            format!("Worktrees:\n{feed}\n\nYour recommendation?")
-        } else {
-            format!("Worktrees :\n{feed}\n\nTa recommandation ?")
-        };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        // The cancel callback aborts the SSE read loop itself, so an
-        // interrupted brief releases the speech session (and speak_lock)
-        // promptly instead of holding them for the full generation.
-        let _ = crate::llm::chat_once_stream(&model, system, &user, 120, &interrupted, |sentence| {
-            if !interrupted() {
-                let _ = session.send(SpeechItem::Sentence { text: sentence, workspace: None });
-            }
-        });
+    /// The sort bug this parser exists to kill: Conductor's two formats have to
+    /// compare correctly against each other, which they never did as strings.
+    #[test]
+    fn both_conductor_timestamp_formats_parse_to_comparable_millis() {
+        let app = iso_to_millis("2026-08-06T18:27:11.000Z");
+        let trigger = iso_to_millis("2026-08-06 18:27:10");
+        assert!(app > trigger, "app={app} trigger={trigger}");
+        // As raw strings the trigger row wrongly sorts first: ' ' < 'T'.
+        assert!("2026-08-06 18:27:10" < "2026-08-06T18:27:11.000Z");
     }
 
-    let _ = session.send(SpeechItem::End);
-    true
+    #[test]
+    fn iso_to_millis_round_trips_a_known_instant() {
+        // 2026-01-01T00:00:00Z — checked against `date -u -j -f`.
+        assert_eq!(iso_to_millis("2026-01-01T00:00:00.000Z"), 1_767_225_600_000);
+        assert_eq!(iso_to_millis("2026-01-01 00:00:00"), 1_767_225_600_000);
+        // Sub-second precision is kept.
+        assert_eq!(iso_to_millis("2026-01-01T00:00:00.826Z") - 1_767_225_600_000, 826);
+    }
+
+    #[test]
+    fn unparseable_timestamps_are_zero_not_now() {
+        // A row with no assistant message yet must never look newer than one
+        // that has one, which is what any "default to now" scheme would do.
+        assert_eq!(iso_to_millis(""), 0);
+        assert_eq!(iso_to_millis("nonsense"), 0);
+        assert_eq!(iso_to_millis("0000-00-00 00:00:00"), 0);
+        assert!(iso_to_millis("2026-01-01 00:00:00") > iso_to_millis(""));
+    }
+
+    #[test]
+    fn idle_is_only_done_when_a_message_backs_it() {
+        assert_eq!(agent_state("idle", true), AgentState::Done);
+        assert_eq!(agent_state("idle", false), AgentState::Idle);
+        assert_eq!(agent_state("working", false), AgentState::Working);
+        assert_eq!(agent_state("error", false), AgentState::Errored);
+        assert_eq!(agent_state("waiting", false), AgentState::Blocked);
+        assert_eq!(agent_state("whatever", true), AgentState::Idle);
+    }
+
+    #[test]
+    fn assistant_envelopes_are_unwrapped_per_agent_format() {
+        let claude = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Tests pass."}]}}"#;
+        assert_eq!(extract_last_assistant_text(claude).as_deref(), Some("Tests pass."));
+        let codex = r#"{"type":"assistant","content":"Done."}"#;
+        assert_eq!(extract_last_assistant_text(codex).as_deref(), Some("Done."));
+        let err = r#"{"type":"error","content":"boom"}"#;
+        assert!(extract_last_assistant_text(err).unwrap().starts_with("[erreur]"));
+        // System envelopes carry no human-meaningful text.
+        assert_eq!(extract_last_assistant_text(r#"{"type":"system"}"#), None);
+    }
+
+    #[test]
+    fn ts_key_normalizes_both_formats_in_sql() {
+        assert_eq!(ts_key("w.updated_at"), "substr(replace(w.updated_at,'T',' '),1,19)");
+    }
 }

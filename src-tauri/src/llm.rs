@@ -355,13 +355,14 @@ fn amend_line(en: bool, target: &crate::targets::Target, already: usize, args: &
             format!("C'est parti, ça fait {n} agents sur {label}.")
         });
     }
-    // A headless agent editing files under a live Conductor session is the one
+    // A second agent landing under one that is already working is the one
     // genuinely surprising collision. Don't block it — just say it.
     if target.live_session {
+        let ade = crate::ade::label();
         return Some(if en {
-            format!("A Conductor agent is already working on {label} — launching anyway.")
+            format!("An {ade} agent is already working on {label} — launching anyway.")
         } else {
-            format!("L'agent Conductor bosse déjà sur {label}, je lance quand même.")
+            format!("Un agent {ade} bosse déjà sur {label}, je lance quand même.")
         });
     }
     if let TargetSource::RepoRoot { .. } = target.source {
@@ -389,6 +390,11 @@ fn launch_error_line(en: bool, e: &crate::agents::LaunchError, label: &str) -> S
     match (e, en) {
         (E::NoCli, true) => "Claude Code isn't installed — I can't launch agents.".into(),
         (E::NoCli, false) => "Claude Code n'est pas installé, je ne peux pas lancer d'agent.".into(),
+        // Only reachable with the launch mode pinned to native on a machine
+        // where no ADE can host an agent; `native_mode` otherwise degrades to
+        // headless on its own.
+        (E::NoAde, true) => "Orca isn't available — I can't launch agents in it.".into(),
+        (E::NoAde, false) => "Orca n'est pas disponible, je ne peux pas y lancer d'agent.".into(),
         (E::BadCwd(l), true) => format!("{l}'s folder is gone."),
         (E::BadCwd(l), false) => format!("Le dossier de {l} n'existe plus."),
         // Refuse, never queue: a voice "ok" followed by ten minutes of nothing
@@ -540,11 +546,11 @@ fn build_system(state: &Arc<AppState>) -> String {
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or(active);
 
-    // Rich per-workspace state from the Conductor DB. Language-aware
+    // Rich per-workspace state from whichever ADE answered. Language-aware
     // descriptors so the model doesn't drift into French in English mode.
     // Six, not ten: this block is the expensive part of the prompt and it now
     // shares room with the launchable-target list. The recap path keeps 10.
-    let ws = crate::conductor::read_state(6);
+    let ws = crate::ade::read_state(6);
     let mut workspace_context = String::new();
     if !ws.is_empty() {
         let lines = ws
@@ -555,14 +561,9 @@ fn build_system(state: &Arc<AppState>) -> String {
                     let preview = s
                         .preview
                         .as_deref()
-                        .map(crate::conductor::clean_snippet)
+                        .map(crate::ade::clean_snippet)
                         .unwrap_or_else(|| (if en { "(nothing new)" } else { "(rien de neuf)" }).into());
-                    let st = match s.status.as_str() {
-                        "working" => if en { "agent working".into() } else { "agent en cours".into() },
-                        "error" => if en { "agent ERRORED".into() } else { "agent EN ERREUR".into() },
-                        "idle" => if en { "agent idle".into() } else { "agent au repos".into() },
-                        other => if en { format!("status {other}") } else { format!("statut {other}") },
-                    };
+                    let st = s.state.descriptor(en);
                     let label = if en { "last message" } else { "dernier message" };
                     let ask = s
                         .original_ask
@@ -581,10 +582,11 @@ fn build_system(state: &Arc<AppState>) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let ade = crate::ade::label();
         let heading = if en {
-            "\n\nCurrent Conductor worktree state (use ONLY this data to answer project questions):"
+            format!("\n\nCurrent {ade} worktree state (use ONLY this data to answer project questions):")
         } else {
-            "\n\nÉtat de tes worktrees Conductor (utilise UNIQUEMENT ces données pour répondre aux questions sur un projet) :"
+            format!("\n\nÉtat de tes worktrees {ade} (utilise UNIQUEMENT ces données pour répondre aux questions sur un projet) :")
         };
         workspace_context = format!("{heading}\n{lines}");
     }
@@ -592,7 +594,7 @@ fn build_system(state: &Arc<AppState>) -> String {
     // Names the model may TARGET. The state block above only carries
     // in-progress worktrees, so without this the model is forbidden (by the
     // "never invent a project" rule) from aiming at most of the user's repos.
-    let names = crate::conductor::launchable_names(24);
+    let names = crate::ade::launchable_names(24);
     let catalog_block = if names.is_empty() {
         String::new()
     } else {
@@ -609,10 +611,13 @@ fn build_system(state: &Arc<AppState>) -> String {
     let live_block = crate::agents::status_block(state, en);
     let workspace_context =
         format!("{workspace_context}{catalog_block}{live_block}{results_block}");
+    // The ADE is named in the prompt so the model's own wording matches the tool
+    // the user is actually looking at.
+    let ade = crate::ade::label();
 
     if en {
         format!(
-            "You are Vox, a voice AI assistant for a developer running many Conductor worktrees in parallel.\n\
+            "You are Vox, a voice AI assistant for a developer running many {ade} worktrees in parallel.\n\
              ABSOLUTE RULES:\n\
              - Reply in ENGLISH ONLY, never in French — even if the context data below is in French\n\
              - Maximum 1 short sentence (15 words max), always\n\
@@ -627,7 +632,7 @@ fn build_system(state: &Arc<AppState>) -> String {
         )
     } else {
         format!(
-            "Tu es Vox, assistant vocal d'un développeur qui gère plusieurs worktrees Conductor en parallèle.\n\
+            "Tu es Vox, assistant vocal d'un développeur qui gère plusieurs worktrees {ade} en parallèle.\n\
              RÈGLES ABSOLUES :\n\
              - Toujours en français, jamais en anglais\n\
              - Maximum 1 phrase courte (15 mots max)\n\

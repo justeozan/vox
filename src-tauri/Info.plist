@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Vox écoute ta voix pour piloter tes agents Conductor.</string>
+  <string>Vox écoute ta voix pour piloter tes agents Orca.</string>
   <key>LSUIElement</key>
   <true/>
 </dict>

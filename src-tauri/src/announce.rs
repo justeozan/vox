@@ -52,7 +52,7 @@ const CHARS_PER_SECOND: f32 = 14.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AnnounceKind {
-    /// A Conductor session produced a new answer.
+    /// An ADE session produced a new answer.
     Finished,
     Errored,
     NeedsInput,
@@ -80,9 +80,9 @@ impl AnnounceKind {
 pub struct Announcement {
     pub id: u64,
     pub kind: AnnounceKind,
-    /// Dedup identity: "conductor:<session id>" | "vox:<job id>".
+    /// Dedup identity: "orca:<pane key>" | "conductor:<session id>" | "vox:<job id>".
     pub key: String,
-    /// MUST equal Conductor's `repos.name` — it's what the renderer matches to
+    /// MUST equal the ADE's own repo name — it's what the renderer matches to
     /// highlight a carousel card.
     pub project: String,
     pub answer: String,
@@ -593,7 +593,7 @@ fn render(
         // line — but only if it carries meaning. A snippet that is mostly the
         // "a code block" placeholder or a bare label ("Command:") is worse than
         // silence: the headline already said the true, useful thing.
-        let snip = crate::conductor::clean_snippet(&cleaned);
+        let snip = crate::ade::clean_snippet(&cleaned);
         let placeholder = if en { "a code block" } else { "un bloc de code" };
         let meat = snip.replace(placeholder, "");
         let words = meat.split_whitespace().filter(|w| w.chars().any(char::is_alphabetic)).count();

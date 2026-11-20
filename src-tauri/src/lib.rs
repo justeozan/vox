@@ -5,12 +5,18 @@
 //! (radius param), which Electron cannot do without native modules — that was
 //! the source of the "grey frame" overflow bug.
 
+pub mod ade;
 pub mod agents;
 pub mod announce;
 pub mod brain;
+pub mod capture;
 pub mod conductor;
 pub mod daemons;
+pub mod dictation;
+pub mod dictation_text;
+pub mod hotkey;
 pub mod llm;
+pub mod orca;
 pub mod setup;
 pub mod speech;
 pub mod targets;
@@ -58,7 +64,68 @@ pub struct Settings {
     /// (your subscription, via the CLI) | "anthropic" / "openai" (API key).
     #[serde(default = "default_provider")]
     pub provider: String,
+    /// Where a voice-launched agent runs: "native" (in the ADE, in a terminal
+    /// you can take over) | "headless" (Vox's own `claude --print` child,
+    /// invisible to the ADE). Native falls back to headless on a machine whose
+    /// ADE cannot host an agent — which is every Conductor install, since
+    /// Conductor has no API.
+    #[serde(default = "default_agent_launch")]
+    pub agent_launch: String,
+    /// Dictation (⌥⇧Space): "llm" cleans the transcript with the brain before
+    /// pasting it (Amical's formatter) | "raw" pastes Whisper's output as is.
+    #[serde(default = "default_dictation_format")]
+    pub dictation_format: String,
+    /// Speech-to-text engine for everything (assistant and dictation):
+    /// "whisper-small" | "whisper-large-v3-turbo" | "parakeet-v3".
+    #[serde(default = "default_stt_model")]
+    pub stt_model: String,
+    /// Dictation key — see hotkey::KEYS. Fn by default.
+    #[serde(default = "default_dictation_key")]
+    pub dictation_key: String,
 }
+
+fn default_stt_model() -> String {
+    "whisper-small".into()
+}
+fn default_dictation_key() -> String {
+    "fn".into()
+}
+
+impl Default for Settings {
+    /// What every per-row reset in the settings panel goes back to.
+    fn default() -> Self {
+        let provider = default_provider();
+        Settings {
+            model: brain::default_model(&provider).to_string(),
+            language: "fr".into(),
+            agent_reply: default_agent_reply(),
+            agent_reply_max_chars: default_agent_reply_max(),
+            tts_engine: default_tts_engine(),
+            provider,
+            agent_launch: default_agent_launch(),
+            dictation_format: default_dictation_format(),
+            stt_model: default_stt_model(),
+            dictation_key: default_dictation_key(),
+        }
+    }
+}
+
+fn default_dictation_format() -> String {
+    "llm".into()
+}
+pub const DICTATION_FORMATS: &[&str] = &["llm", "raw"];
+
+pub fn now_ms_u64() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn default_agent_launch() -> String {
+    "native".into()
+}
+pub const AGENT_LAUNCH_MODES: &[&str] = &["native", "headless"];
 
 fn default_provider() -> String {
     "ollama".into()
@@ -200,7 +267,46 @@ fn load_settings() -> Settings {
         }
         d
     };
-    Settings { model, language, agent_reply, agent_reply_max_chars, tts_engine, provider }
+    let agent_launch = std::env::var("VOX_AGENT_LAUNCH")
+        .ok()
+        .or_else(|| persisted.get("agent_launch").and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_else(default_agent_launch)
+        .to_lowercase();
+    let agent_launch = if AGENT_LAUNCH_MODES.contains(&agent_launch.as_str()) {
+        agent_launch
+    } else {
+        default_agent_launch()
+    };
+    let dictation_format = persisted
+        .get("dictation_format")
+        .and_then(|v| v.as_str())
+        .filter(|f| DICTATION_FORMATS.contains(f))
+        .map(String::from)
+        .unwrap_or_else(default_dictation_format);
+    let stt_model = persisted
+        .get("stt_model")
+        .and_then(|v| v.as_str())
+        .filter(|m| setup::STT_MODELS.iter().any(|(id, _, _)| id == m))
+        .map(String::from)
+        .unwrap_or_else(default_stt_model);
+    let dictation_key = persisted
+        .get("dictation_key")
+        .and_then(|v| v.as_str())
+        .filter(|k| hotkey::KEYS.contains(k))
+        .map(String::from)
+        .unwrap_or_else(default_dictation_key);
+    Settings {
+        model,
+        language,
+        agent_reply,
+        agent_reply_max_chars,
+        tts_engine,
+        provider,
+        agent_launch,
+        dictation_format,
+        stt_model,
+        dictation_key,
+    }
 }
 
 fn save_settings(s: &Settings) {
@@ -304,7 +410,9 @@ pub struct AppState {
     /// Unix seconds of the last spoken "I could do X next" offer.
     pub last_proposal_at: AtomicU64,
     /// (cwd, unix) for agents Vox launched recently. Guards against announcing
-    /// the same work twice should a Conductor bridge ever exist.
+    /// the same work twice. Only headless launches are recorded: a native one
+    /// IS an ADE agent, and the watcher claims its job instead (see
+    /// `agents::claim_native`).
     pub vox_cwds: Mutex<Vec<(String, u64)>>,
 }
 
@@ -440,6 +548,19 @@ fn get_settings(state: tauri::State<'_, Arc<AppState>>) -> Settings {
     state.settings.lock().unwrap().clone()
 }
 
+/// Which ADE Vox is driving, and whether it can host an agent.
+///
+/// The settings panel needs both: it names the tool in the launch-mode label,
+/// and it has to stop offering "in Orca" on a machine where that would silently
+/// degrade to headless — Conductor has no API to launch anything through.
+#[tauri::command]
+fn ade_info() -> Value {
+    json!({
+        "label": ade::label(),
+        "can_launch_natively": orca::installed(),
+    })
+}
+
 #[tauri::command]
 async fn list_models(provider: Option<String>) -> Vec<String> {
     let provider = provider.unwrap_or_else(persisted_provider);
@@ -531,6 +652,8 @@ async fn set_settings(
     tauri::async_runtime::spawn_blocking(move || {
         let mut restart = false;
         let mut engine_changed = false;
+        let mut stt_changed = false;
+        let mut key_changed = false;
         {
             let mut settings = st.settings.lock().unwrap();
             if let Some(m) = next.get("model").and_then(|v| v.as_str()) {
@@ -553,6 +676,14 @@ async fn set_settings(
             if let Some(n) = next.get("agent_reply_max_chars").and_then(|v| v.as_u64()) {
                 settings.agent_reply_max_chars = (n as usize).clamp(120, 2000);
             }
+            // No daemon restart either: the mode is read at launch time, so the
+            // next voice command already picks it up.
+            if let Some(m) = next.get("agent_launch").and_then(|v| v.as_str()) {
+                let m = m.to_lowercase();
+                if AGENT_LAUNCH_MODES.contains(&m.as_str()) {
+                    settings.agent_launch = m;
+                }
+            }
             if let Some(pv) = next.get("provider").and_then(|v| v.as_str()) {
                 if brain::PROVIDERS.contains(&pv) {
                     settings.provider = pv.to_string();
@@ -563,6 +694,23 @@ async fn set_settings(
                 // than be a no-op.
                 if !brain::model_fits(&settings.provider, &settings.model) {
                     settings.model = brain::default_model(&settings.provider).to_string();
+                }
+            }
+            if let Some(f) = next.get("dictation_format").and_then(|v| v.as_str()) {
+                if DICTATION_FORMATS.contains(&f) {
+                    settings.dictation_format = f.to_string();
+                }
+            }
+            if let Some(m) = next.get("stt_model").and_then(|v| v.as_str()) {
+                if m != settings.stt_model && setup::STT_MODELS.iter().any(|(id, _, _)| *id == m) {
+                    settings.stt_model = m.to_string();
+                    stt_changed = true;
+                }
+            }
+            if let Some(k) = next.get("dictation_key").and_then(|v| v.as_str()) {
+                if k != settings.dictation_key && hotkey::KEYS.contains(&k) {
+                    settings.dictation_key = k.to_string();
+                    key_changed = true;
                 }
             }
             if let Some(e) = next.get("tts_engine").and_then(|v| v.as_str()) {
@@ -583,6 +731,11 @@ async fn set_settings(
                 st.history.lock().unwrap().clear();
             }
             daemons::restart_daemons(&st, app.clone());
+        } else if stt_changed {
+            daemons::restart_stt(&st);
+        }
+        if key_changed {
+            apply_dictation_key(&app, &st.settings.lock().unwrap().dictation_key);
         }
         // The whole point of an A/B is hearing the new voice NOW.
         // `startup_brief_done` stays true, so nothing else would speak until
@@ -602,15 +755,9 @@ async fn set_settings(
             });
         }
         let s = st.settings.lock().unwrap().clone();
-        Ok(json!({
-            "provider": s.provider,
-            "tts_engine": s.tts_engine,
-            "model": s.model,
-            "language": s.language,
-            "agent_reply": s.agent_reply,
-            "agent_reply_max_chars": s.agent_reply_max_chars,
-            "restarted": restart,
-        }))
+        let mut out = serde_json::to_value(&s).unwrap_or_else(|_| json!({}));
+        out["restarted"] = json!(restart || stt_changed);
+        Ok(out)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -672,6 +819,78 @@ async fn voice_input(
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// The ⌥⇧Space combination goes through the global-shortcut plugin; every
+/// other dictation key through the event tap (hotkey.rs).
+fn alt_shift_space() -> Shortcut {
+    Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::Space)
+}
+
+fn apply_dictation_key(app: &AppHandle, key: &str) {
+    let k = hotkey::Key::parse(key);
+    hotkey::set_key(k);
+    let gs = app.global_shortcut();
+    let combo = alt_shift_space();
+    let r = if k == hotkey::Key::AltShiftSpace {
+        if gs.is_registered(combo) { Ok(()) } else { gs.register(combo) }
+    } else if gs.is_registered(combo) {
+        gs.unregister(combo)
+    } else {
+        Ok(())
+    };
+    if let Err(e) = r {
+        eprintln!("[vox] dictation key {key}: {e}");
+    }
+    println!("[vox] dictation key = {key}");
+}
+
+#[tauri::command]
+fn settings_defaults() -> Settings {
+    Settings::default()
+}
+
+#[tauri::command]
+fn stt_models() -> Vec<Value> {
+    setup::STT_MODELS
+        .iter()
+        .map(|(id, label, detail)| json!({ "id": id, "label": label, "detail": detail, "installed": setup::stt_installed(id) }))
+        .collect()
+}
+
+#[tauri::command]
+async fn install_stt(app: AppHandle, model: String) -> Result<Value, String> {
+    if !setup::STT_MODELS.iter().any(|(id, _, _)| *id == model) {
+        return Err(format!("unknown model \"{model}\""));
+    }
+    tauri::async_runtime::spawn_blocking(move || setup::install_stt(&app, &model))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn accessibility_status() -> bool {
+    dictation::accessibility_trusted(false)
+}
+
+#[tauri::command]
+fn request_accessibility() -> bool {
+    dictation::accessibility_trusted(true)
+}
+
+#[tauri::command]
+fn fn_key_status() -> Value {
+    json!({ "globe_does_nothing": hotkey::globe_does_nothing() })
+}
+
+#[tauri::command]
+fn get_vocabulary() -> dictation::Vocabulary {
+    dictation::load_vocabulary()
+}
+
+#[tauri::command]
+fn set_vocabulary(vocab: dictation::Vocabulary) -> Result<(), String> {
+    dictation::save_vocabulary(vocab)
 }
 
 #[tauri::command]
@@ -820,7 +1039,7 @@ fn replay_recap(app: AppHandle, state: tauri::State<'_, Arc<AppState>>) {
     let st = state.inner().clone();
     std::thread::spawn(move || {
         st.startup_brief_done.store(false, Ordering::SeqCst);
-        if !conductor::speak_startup_brief(&app, &st) {
+        if !ade::speak_startup_brief(&app, &st) {
             // A button press deserves a reply even when there's nothing.
             let en = st.settings.lock().unwrap().language == "en";
             speech::speak(
@@ -907,7 +1126,7 @@ fn pronunciations_path() -> PathBuf {
 }
 
 /// Word → phonetic respelling, applied to TTS input so the voice says tricky
-/// names the way you want (e.g. {"Conductor": "conedeuctor"}). Edited via
+/// names the way you want (e.g. {"Orca": "orka"}). Edited via
 /// ~/.vox/pronunciations.json. Voice-cloning is out of scope for Kokoro.
 pub fn load_pronunciations() -> Vec<(String, String)> {
     std::fs::read_to_string(pronunciations_path())
@@ -970,11 +1189,18 @@ pub fn run() {
 
     let alt_space = Shortcut::new(Some(Modifiers::ALT), Code::Space);
     let cmd_comma = Shortcut::new(Some(Modifiers::SUPER), Code::Comma);
+    let dictate = alt_shift_space();
 
     tauri::Builder::default()
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, shortcut, event| {
+                    // Dictation is push-to-talk: it needs the release too.
+                    if shortcut == &dictate {
+                        let _ = app;
+                        dictation::on_key(event.state() == ShortcutState::Pressed);
+                        return;
+                    }
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
@@ -990,11 +1216,20 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             set_settings,
+            ade_info,
             list_models,
             provider_status,
             probe_setup,
             run_setup,
             voice_input,
+            settings_defaults,
+            stt_models,
+            install_stt,
+            accessibility_status,
+            request_accessibility,
+            fn_key_status,
+            get_vocabulary,
+            set_vocabulary,
             audio_done,
             resize_window,
             interrupt,
@@ -1191,6 +1426,10 @@ pub fn run() {
             if let Err(e) = app.global_shortcut().register(alt_space) {
                 eprintln!("[vox] failed to register Alt+Space: {e}");
             }
+            // Dictation: Fn & co. through the event tap, ⌥⇧Space through the plugin.
+            dictation::init(app.handle().clone(), state.clone());
+            apply_dictation_key(app.handle(), &state.settings.lock().unwrap().dictation_key);
+            hotkey::start();
             if let Err(e) = app.global_shortcut().register(cmd_comma) {
                 eprintln!("[vox] failed to register Cmd+,: {e}");
             }

@@ -1,10 +1,19 @@
-//! Claude CLI agent subprocesses: launched by voice into any repo, tracked in a
-//! job registry, and — crucially — their ANSWER is captured.
+//! Agents launched by voice, in one of two modes — and, crucially, their ANSWER
+//! is captured either way.
 //!
-//! The agent runs as `claude --print --output-format stream-json --verbose`, so
-//! we get incremental assistant text (which survives a timeout kill) plus an
-//! explicit terminal envelope telling us whether it actually succeeded. That
-//! answer is what the announcement pipeline speaks.
+//! **Native** (the default when Orca is available) hands the work to the ADE:
+//! `orca terminal create --command claude` in an existing worktree, or
+//! `orca worktree create --agent claude --prompt …` for a fresh one. The agent
+//! runs in a real terminal the user can scroll back through and take over, and
+//! its answer comes back through the watcher like any other Orca agent's. Vox
+//! holds only the slot and the task text.
+//!
+//! **Headless** runs `claude --print --output-format stream-json --verbose` as
+//! Vox's own child, so we get incremental assistant text (which survives a
+//! timeout kill) plus an explicit terminal envelope telling us whether it really
+//! succeeded. Nothing about it is visible in the ADE — which is the trade: it is
+//! the right shape for a thirty-second errand nobody wants a worktree card for,
+//! and the wrong shape for anything you might want to supervise.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -13,14 +22,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+
 use tauri::{AppHandle, Emitter};
 
+use crate::ade::Snapshot;
+use crate::announce::AnnounceKind;
 use crate::targets::{Target, TargetSource};
 use crate::AppState;
 
-/// Each agent is a full Claude Code process (node runtime, MCP servers, file
-/// watchers) and they all contend on one rate limit. Four already saturates a
-/// laptop that is also running Ollama and a speech model.
+/// Each headless agent is a full Claude Code process (node runtime, MCP servers,
+/// file watchers) and they all contend on one rate limit. Four already saturates
+/// a laptop that is also running Ollama and a speech model.
 fn max_agents() -> usize {
     std::env::var("VOX_MAX_AGENTS")
         .ok()
@@ -39,9 +51,19 @@ fn agent_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
+/// Which agent CLI a native launch starts in the ADE terminal. Orca knows
+/// `claude`, `codex`, `opencode`, `omp`, `pi`, `grok` and any other installed TUI
+/// agent; Vox has no opinion beyond the default.
+fn native_agent() -> String {
+    std::env::var("VOX_ADE_AGENT")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "claude".into())
+}
+
 /// Grace period before an agent aimed at a NON-active target actually starts.
-/// ⌥Space during it cancels the launch. Two seconds against a ten-minute task
-/// is free, and it reuses interrupt_gen — no extra conversational turn.
+/// ⌥Space during it cancels the launch. Two seconds against a ten-minute task is
+/// free, and it reuses interrupt_gen — no extra conversational turn.
 const CANCEL_WINDOW: Duration = Duration::from_secs(2);
 
 /// Cap on captured stdout. Well past any spoken answer; the reader keeps
@@ -68,6 +90,25 @@ impl AgentPhase {
     }
 }
 
+/// Where the agent actually runs, and therefore who reports its answer.
+#[derive(Clone, Debug)]
+pub enum JobKind {
+    /// Vox's own child process. Vox owns the lifecycle and reads stdout.
+    Headless { pid: Option<u32> },
+    /// A real ADE agent in a terminal. The watcher reports the answer; the
+    /// handle is kept so "stop" can interrupt it without closing the tab.
+    Native { terminal: String },
+}
+
+impl JobKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            JobKind::Headless { .. } => "headless",
+            JobKind::Native { .. } => "native",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AgentJob {
     pub id: u64,
@@ -79,12 +120,14 @@ pub struct AgentJob {
     pub task: String,
     pub phase: AgentPhase,
     pub started: Instant,
-    pub pid: Option<u32>,
+    pub kind: JobKind,
 }
 
 #[derive(Debug)]
 pub enum LaunchError {
     NoCli,
+    /// Native mode was asked for but no ADE can host an agent.
+    NoAde,
     BadCwd(String),
     TooMany(usize),
     Cancelled,
@@ -92,8 +135,8 @@ pub enum LaunchError {
 }
 
 /// How an agent's run ended. The distinction between `Failed` and `TimedOut`
-/// only exists because the wait loop now keeps the exit status and a
-/// `timed_out` flag — previously a kill and a clean exit were indistinguishable.
+/// only exists because the wait loop keeps the exit status and a `timed_out`
+/// flag — previously a kill and a clean exit were indistinguishable.
 #[derive(Clone, Debug)]
 pub enum AgentOutcome {
     Success { text: String },
@@ -124,6 +167,19 @@ impl AgentOutcome {
     }
 }
 
+/// The launch mode in force, after reconciling the setting with reality.
+///
+/// A machine running Conductor cannot host a native agent — Conductor has no
+/// API — so the setting degrades to headless rather than failing the launch.
+fn native_mode(state: &Arc<AppState>) -> bool {
+    let want = state.settings.lock().unwrap().agent_launch == "native";
+    if want && !crate::orca::installed() {
+        println!("[vox] native launch asked for, but no ADE can host an agent — using headless");
+        return false;
+    }
+    want
+}
+
 fn emit_agents(app: &AppHandle, state: &Arc<AppState>) {
     let jobs = state.agents.lock().unwrap();
     let list: Vec<Value> = jobs
@@ -133,6 +189,7 @@ fn emit_agents(app: &AppHandle, state: &Arc<AppState>) {
                 "id": j.id,
                 "label": j.label,
                 "phase": j.phase.as_str(),
+                "mode": j.kind.as_str(),
                 "task": j.task.chars().take(80).collect::<String>(),
                 "elapsed_s": j.started.elapsed().as_secs(),
             })
@@ -153,10 +210,10 @@ fn set_phase(app: &AppHandle, state: &Arc<AppState>, id: u64, phase: AgentPhase)
     emit_agents(app, state);
 }
 
-fn set_pid(state: &Arc<AppState>, id: u64, pid: Option<u32>) {
+fn set_kind(state: &Arc<AppState>, id: u64, kind: JobKind) {
     let mut jobs = state.agents.lock().unwrap();
     if let Some(j) = jobs.iter_mut().find(|j| j.id == id) {
-        j.pid = pid;
+        j.kind = kind;
     }
 }
 
@@ -170,6 +227,50 @@ fn remove_job(app: &AppHandle, state: &Arc<AppState>, id: u64) -> Option<AgentJo
     job
 }
 
+/// Hand a running NATIVE job over to the watcher, which has just seen its agent
+/// settle in the ADE.
+///
+/// Claiming is what keeps one finished agent from being announced twice: without
+/// it the watcher would report an anonymous "findy is done" for work Vox itself
+/// started and can describe properly.
+pub fn claim_native(state: &Arc<AppState>, path: &str) -> Option<AgentJob> {
+    let mut jobs = state.agents.lock().unwrap();
+    let idx = jobs.iter().position(|j| {
+        matches!(j.kind, JobKind::Native { .. }) && j.phase == AgentPhase::Running && j.path == path
+    })?;
+    Some(jobs.remove(idx))
+}
+
+/// Report a claimed native job, with the task Vox was actually asked for.
+pub fn finish_native(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    job: AgentJob,
+    snap: &Snapshot,
+    kind: AnnounceKind,
+) {
+    emit_agents(app, state);
+    let secs = job.started.elapsed().as_secs();
+    let answer = snap.answer.clone().unwrap_or_default();
+    let outcome = match kind {
+        AnnounceKind::Errored => AgentOutcome::Failed { code: -1, detail: "ade reported an error".into() },
+        _ if answer.trim().is_empty() => AgentOutcome::Empty,
+        _ => AgentOutcome::Success { text: answer },
+    };
+    println!("[vox] native agent {} on {} → {} ({secs}s)", job.id, job.label, outcome.as_str());
+    let _ = app.emit(
+        "agent-finished",
+        json!({
+            "id": job.id,
+            "label": job.label,
+            "outcome": outcome.as_str(),
+            "duration_s": secs,
+            "snippet": outcome.text().map(crate::ade::clean_snippet).unwrap_or_default(),
+        }),
+    );
+    crate::announce::agent_finished(app, state, &job, outcome);
+}
+
 /// Number of agents Vox currently has running.
 pub fn running_count(state: &Arc<AppState>) -> usize {
     state.agents.lock().unwrap().len()
@@ -178,9 +279,9 @@ pub fn running_count(state: &Arc<AppState>) -> usize {
 /// What Vox has running RIGHT NOW, for the system prompt.
 ///
 /// Without this the model has no grounded answer to "how are my agents doing?" —
-/// it only sees Conductor's worktree state, which by construction never contains
-/// the headless agents Vox itself launched. It would then either invent an
-/// answer or say nothing is running while three agents are working.
+/// it only sees the ADE's worktree state, which for a headless agent by
+/// construction never contains it. It would then either invent an answer or say
+/// nothing is running while three agents are working.
 pub fn status_block(state: &Arc<AppState>, en: bool) -> String {
     let jobs = state.agents.lock().unwrap();
     if jobs.is_empty() {
@@ -226,36 +327,45 @@ pub fn count_in(state: &Arc<AppState>, path: &str) -> usize {
 /// Stop every running agent. The hard undo — worth more than a confirmation
 /// prompt, because it also fixes mistakes a confirmation would never catch
 /// (right repo, wrong task).
+///
+/// A native agent is INTERRUPTED, not killed: its terminal stays open so the
+/// user can read what it got through and pick the thread back up. Closing the
+/// tab would throw away the one thing native mode exists to provide.
 pub fn kill_all(app: &AppHandle, state: &Arc<AppState>) -> usize {
     let jobs: Vec<AgentJob> = state.agents.lock().unwrap().clone();
     let mut killed = 0;
     for j in &jobs {
-        if let Some(pid) = j.pid {
+        let ok = match &j.kind {
             // The supervisor thread owns the Child; signal by pid instead so we
             // don't need to share it across threads.
-            let ok = Command::new("kill")
+            JobKind::Headless { pid: Some(pid) } => Command::new("kill")
                 .arg("-TERM")
                 .arg(pid.to_string())
                 .status()
                 .map(|s| s.success())
-                .unwrap_or(false);
-            if ok {
-                killed += 1;
+                .unwrap_or(false),
+            JobKind::Native { terminal } if !terminal.is_empty() => {
+                crate::orca::interrupt(terminal)
             }
+            // Drafting agents have no pid or handle yet; interrupt_gen cancels
+            // them below.
+            _ => false,
+        };
+        if ok {
+            killed += 1;
         }
     }
-    // Drafting agents have no pid yet; interrupt_gen already cancels them.
     state.interrupt_gen.fetch_add(1, Ordering::SeqCst);
     emit_agents(app, state);
     killed
 }
 
-// ── stdout capture ───────────────────────────────────────────────────────────
+// ── stdout capture (headless only) ───────────────────────────────────────────
 
 #[derive(Default)]
 struct Capture {
-    /// Latest assistant text seen (replaced, not appended — the final message
-    /// is the summary we want).
+    /// Latest assistant text seen (replaced, not appended — the final message is
+    /// the summary we want).
     last_text: String,
     /// The `result` envelope's payload, when it arrives.
     result_text: Option<String>,
@@ -336,8 +446,7 @@ fn absorb(c: &mut Capture, v: &Value) {
             }
         }
         "result" => {
-            c.result_subtype =
-                v.get("subtype").and_then(|s| s.as_str()).map(String::from);
+            c.result_subtype = v.get("subtype").and_then(|s| s.as_str()).map(String::from);
             c.result_is_error = v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false);
             if let Some(r) = v.get("result").and_then(|r| r.as_str()) {
                 let r = r.trim();
@@ -373,17 +482,25 @@ pub fn spawn_agent(app: &AppHandle, state: &Arc<AppState>, task: &str) -> Result
 ///
 /// Pre-flight validation happens HERE, on the caller's thread, so a failure is
 /// still speakable in the same breath as the request. Previously `spawn()` ran
-/// inside the worker, long after the tool handler had returned "launching!" —
-/// so a dead path or a missing CLI produced a confident lie and total silence.
+/// inside the worker, long after the tool handler had returned "launching!" — so
+/// a dead path or a missing CLI produced a confident lie and total silence.
 pub fn launch(
     app: &AppHandle,
     state: &Arc<AppState>,
     target: &Target,
     task: &str,
 ) -> Result<AgentJob, LaunchError> {
-    let claude = state.paths.lock().unwrap().claude_cli.clone();
-    let Some(claude) = claude else {
-        return Err(LaunchError::NoCli);
+    let native = native_mode(state);
+    let claude = if native {
+        if !crate::orca::installed() {
+            return Err(LaunchError::NoAde);
+        }
+        None
+    } else {
+        match state.paths.lock().unwrap().claude_cli.clone() {
+            Some(c) => Some(c),
+            None => return Err(LaunchError::NoCli),
+        }
     };
     if !std::path::Path::new(&target.path).exists() {
         return Err(LaunchError::BadCwd(target.label.clone()));
@@ -409,7 +526,11 @@ pub fn launch(
             // and the concurrency cap counts agents that are still drafting.
             phase: AgentPhase::Drafting,
             started: Instant::now(),
-            pid: None,
+            kind: if native {
+                JobKind::Native { terminal: String::new() }
+            } else {
+                JobKind::Headless { pid: None }
+            },
         });
         id
     };
@@ -420,54 +541,157 @@ pub fn launch(
         return Err(LaunchError::SpawnFailed("job vanished".into()));
     };
 
-    // Tell the Conductor watcher this directory is ours for the next couple of
-    // minutes, so it never reports the same work from the other side.
-    crate::watch::note_vox_launch(state, &target.path);
+    if !native {
+        // Tell the watcher this directory is ours for the next couple of minutes,
+        // so it never reports the same work from the other side.
+        crate::watch::note_vox_launch(state, &target.path);
+    }
 
     let needs_window = target.source != TargetSource::Active;
     let gen0 = state.interrupt_gen.load(Ordering::SeqCst);
     let (app_c, state_c) = (app.clone(), state.clone());
-    let (cwd, task_s, label) = (target.path.clone(), task.to_string(), target.label.clone());
+    let (task_s, label) = (task.to_string(), target.label.clone());
+    let target_c = target.clone();
     std::thread::spawn(move || {
-        supervise(app_c, state_c, id, claude, cwd, task_s, label, needs_window, gen0);
+        // Cancel window — ⌥Space within CANCEL_WINDOW aborts a launch aimed at a
+        // repo other than the active one, before anything is written anywhere.
+        if needs_window {
+            std::thread::sleep(CANCEL_WINDOW);
+            if state_c.interrupt_gen.load(Ordering::SeqCst) != gen0 {
+                println!("[vox] agent on {label} cancelled inside the launch window");
+                remove_job(&app_c, &state_c, id);
+                return;
+            }
+        }
+
+        // Expand the short spoken task into a real prompt. Off the latency path:
+        // the confirmation has already been spoken by now, so this costs nothing
+        // the user can perceive.
+        let prompt = crate::llm::draft_prompt(&state_c, &label, &task_s);
+        set_phase(&app_c, &state_c, id, AgentPhase::Running);
+
+        match claude {
+            Some(claude) => supervise_headless(app_c, state_c, id, claude, target_c.path, prompt, label),
+            None => supervise_native(app_c, state_c, id, target_c, prompt, label, task_s),
+        }
     });
 
     Ok(job)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn supervise(
+// ── Native supervision ───────────────────────────────────────────────────────
+
+/// Hand the work to the ADE, then wait for the watcher to claim the job.
+///
+/// Vox does no lifecycle management here: the agent belongs to Orca. The only
+/// job of this thread is to reap the slot if the answer never arrives, so one
+/// lost agent cannot permanently eat a concurrency slot.
+fn supervise_native(
+    app: AppHandle,
+    state: Arc<AppState>,
+    id: u64,
+    target: Target,
+    prompt: String,
+    label: String,
+    task: String,
+) {
+    let agent = native_agent();
+    // A repo target gets a fresh worktree: running an unsupervised agent in a
+    // repo's main checkout dirties the tree that worktrees exist to protect.
+    // A worktree target gets a new terminal in the tree the user named.
+    let launched = match &target.source {
+        TargetSource::RepoRoot { repo } => {
+            crate::orca::launch_new_worktree(&target.path, &slug(&task, repo), &agent, &prompt)
+        }
+        _ => crate::orca::launch_in(&target.path, &agent, &prompt, "Vox"),
+    };
+
+    let launched = match launched {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[vox] native launch on {label} failed: {e}");
+            finish_headless(&app, &state, id, AgentOutcome::SpawnError { detail: e });
+            return;
+        }
+    };
+
+    set_kind(&state, id, JobKind::Native { terminal: launched.terminal.clone() });
+    // The path can change under us: a repo target becomes a brand-new worktree,
+    // and the watcher matches jobs BY PATH. Without this the claim would never
+    // fire and every native launch on a repo would be announced anonymously.
+    {
+        let mut jobs = state.agents.lock().unwrap();
+        if let Some(j) = jobs.iter_mut().find(|j| j.id == id) {
+            j.path = launched.path.clone();
+        }
+    }
+    emit_agents(&app, &state);
+
+    // Say in Orca's own UI where this came from, so a worktree that appears out
+    // of nowhere is explainable.
+    crate::orca::set_comment(&launched.path, &format!("Vox: {}", trim(&task, 90)));
+
+    let _ = app.emit(
+        "delegation",
+        json!({ "project": label, "path": launched.path, "prompt": prompt, "mode": "native" }),
+    );
+
+    // Reap: the watcher normally claims this job long before the timeout. If it
+    // never does — the pane was closed, Orca restarted, the agent was taken over
+    // by hand — drop the slot quietly rather than announcing a result we do not
+    // have.
+    let deadline = Instant::now() + agent_timeout();
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_secs(2));
+        let still_ours = state.agents.lock().unwrap().iter().any(|j| j.id == id);
+        if !still_ours {
+            return;
+        }
+    }
+    println!("[vox] native agent {id} on {label} never settled — releasing the slot");
+    remove_job(&app, &state, id);
+}
+
+/// A filesystem- and Orca-safe worktree name derived from the spoken task.
+fn slug(task: &str, repo: &str) -> String {
+    let mut out = String::new();
+    for c in task.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.extend(c.to_lowercase());
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+        if out.chars().count() >= 32 {
+            break;
+        }
+    }
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() {
+        format!("vox-{repo}")
+    } else {
+        format!("vox-{out}")
+    }
+}
+
+fn trim(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
+// ── Headless supervision ─────────────────────────────────────────────────────
+
+fn supervise_headless(
     app: AppHandle,
     state: Arc<AppState>,
     id: u64,
     claude: std::path::PathBuf,
     cwd: String,
-    task: String,
+    prompt: String,
     label: String,
-    needs_window: bool,
-    gen0: u64,
 ) {
-    // Cancel window — ⌥Space within CANCEL_WINDOW aborts a launch aimed at a
-    // repo other than the active one, before anything is written anywhere.
-    if needs_window {
-        std::thread::sleep(CANCEL_WINDOW);
-        if state.interrupt_gen.load(Ordering::SeqCst) != gen0 {
-            println!("[vox] agent on {label} cancelled inside the launch window");
-            remove_job(&app, &state, id);
-            return;
-        }
-    }
-
-    // Expand the short spoken task into a real prompt. Off the latency path:
-    // the confirmation has already been spoken by now, so this costs nothing
-    // the user can perceive.
-    let prompt = crate::llm::draft_prompt(&state, &label, &task);
-    set_phase(&app, &state, id, AgentPhase::Running);
-
     let cap = Arc::new(Mutex::new(Capture::default()));
-    // `--` so a drafted prompt starting with '-' (bullet lists!) can't be
-    // parsed as a CLI flag. `--verbose` is MANDATORY with stream-json under
-    // --print: without it the CLI exits immediately with a usage error.
+    // `--` so a drafted prompt starting with '-' (bullet lists!) can't be parsed
+    // as a CLI flag. `--verbose` is MANDATORY with stream-json under --print:
+    // without it the CLI exits immediately with a usage error.
     let spawned = Command::new(&claude)
         .args([
             "--print",
@@ -488,20 +712,19 @@ fn supervise(
         Ok(c) => c,
         Err(e) => {
             eprintln!("[vox] agent spawn failed: {e}");
-            finish(&app, &state, id, AgentOutcome::SpawnError { detail: e.to_string() });
+            finish_headless(&app, &state, id, AgentOutcome::SpawnError { detail: e.to_string() });
             return;
         }
     };
-    set_pid(&state, id, Some(child.id()));
+    set_kind(&state, id, JobKind::Headless { pid: Some(child.id()) });
 
     // Echo the EXACT prompt that was sent, only once the process really exists.
-    // Carried over from the delegation echo on main: what Vox says out loud is
-    // one short sentence, so this is the only place the full drafted prompt is
-    // ever visible — and Conductor cannot show it, since a headless agent
-    // writes nothing to its database.
+    // What Vox says out loud is one short sentence, so this is the only place the
+    // full drafted prompt is ever visible — and the ADE cannot show it, since a
+    // headless agent writes nothing into it.
     let _ = app.emit(
         "delegation",
-        json!({ "project": label, "path": cwd, "prompt": prompt }),
+        json!({ "project": label, "path": cwd, "prompt": prompt, "mode": "headless" }),
     );
 
     if let Some(out) = child.stdout.take() {
@@ -536,8 +759,8 @@ fn supervise(
 
     // The last stdout lines can land after try_wait reports the exit. Wait for
     // the byte count to settle rather than join()ing the reader: kill() only
-    // signals the claude process, and its grandchildren (bash, node) inherit
-    // the stdout fd — so the reader may never observe EOF.
+    // signals the claude process, and its grandchildren (bash, node) inherit the
+    // stdout fd — so the reader may never observe EOF.
     let mut last = 0usize;
     for _ in 0..5 {
         let n = cap.lock().unwrap().bytes;
@@ -555,11 +778,7 @@ fn supervise(
         .filter(|t| !t.trim().is_empty())
         .or_else(|| Some(c.last_text.clone()).filter(|t| !t.trim().is_empty()))
         .or_else(|| Some(c.raw_tail.trim().to_string()).filter(|t| !t.is_empty()));
-    let subtype_bad = c
-        .result_subtype
-        .as_deref()
-        .map(|s| s != "success")
-        .unwrap_or(false);
+    let subtype_bad = c.result_subtype.as_deref().map(|s| s != "success").unwrap_or(false);
     let is_error = c.result_is_error || subtype_bad;
     let detail = if c.stderr_tail.trim().is_empty() {
         c.result_subtype.clone().unwrap_or_else(|| "unknown".into())
@@ -578,10 +797,10 @@ fn supervise(
             _ => AgentOutcome::Empty,
         }
     };
-    finish(&app, &state, id, outcome);
+    finish_headless(&app, &state, id, outcome);
 }
 
-fn finish(app: &AppHandle, state: &Arc<AppState>, id: u64, outcome: AgentOutcome) {
+fn finish_headless(app: &AppHandle, state: &Arc<AppState>, id: u64, outcome: AgentOutcome) {
     let job = remove_job(app, state, id);
     let (label, secs) = job
         .as_ref()
@@ -589,10 +808,7 @@ fn finish(app: &AppHandle, state: &Arc<AppState>, id: u64, outcome: AgentOutcome
         .unwrap_or_else(|| (String::new(), 0));
     println!("[vox] agent {id} on {label} → {} ({secs}s)", outcome.as_str());
 
-    let snippet = outcome
-        .text()
-        .map(crate::conductor::clean_snippet)
-        .unwrap_or_default();
+    let snippet = outcome.text().map(crate::ade::clean_snippet).unwrap_or_default();
     let _ = app.emit(
         "agent-finished",
         json!({
@@ -606,5 +822,50 @@ fn finish(app: &AppHandle, state: &Arc<AppState>, id: u64, outcome: AgentOutcome
 
     if let Some(job) = job {
         crate::announce::agent_finished(app, state, &job, outcome);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugs_are_filesystem_safe_and_bounded() {
+        assert_eq!(slug("corriger les tests qui échouent", "findy"), "vox-corriger-les-tests-qui-chouent");
+        assert_eq!(slug("fix login!!!", "findy"), "vox-fix-login");
+        // Never empty, never just punctuation.
+        assert_eq!(slug("...", "findy"), "vox-findy");
+        assert_eq!(slug("", "findy"), "vox-findy");
+        assert!(slug(&"a".repeat(200), "findy").chars().count() <= 36);
+        assert!(slug("Fix Login", "r").chars().all(|c| c.is_ascii_lowercase() || c == '-'));
+    }
+
+    /// A native job is claimed by path, and only while it is actually running —
+    /// claiming a drafting job would announce a result before the agent existed.
+    #[test]
+    fn only_running_native_jobs_are_claimable() {
+        let job = |phase, kind| AgentJob {
+            id: 1,
+            label: "findy".into(),
+            repo: "findy".into(),
+            path: "/tmp/findy".into(),
+            task: "fix".into(),
+            phase,
+            started: Instant::now(),
+            kind,
+        };
+        let claimable = |j: &AgentJob, path: &str| {
+            matches!(j.kind, JobKind::Native { .. }) && j.phase == AgentPhase::Running && j.path == path
+        };
+        assert!(claimable(&job(AgentPhase::Running, JobKind::Native { terminal: "h".into() }), "/tmp/findy"));
+        assert!(!claimable(&job(AgentPhase::Drafting, JobKind::Native { terminal: String::new() }), "/tmp/findy"));
+        assert!(!claimable(&job(AgentPhase::Running, JobKind::Headless { pid: Some(1) }), "/tmp/findy"));
+        assert!(!claimable(&job(AgentPhase::Running, JobKind::Native { terminal: "h".into() }), "/elsewhere"));
+    }
+
+    #[test]
+    fn job_modes_are_reported_to_the_renderer() {
+        assert_eq!(JobKind::Native { terminal: "h".into() }.as_str(), "native");
+        assert_eq!(JobKind::Headless { pid: None }.as_str(), "headless");
     }
 }

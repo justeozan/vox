@@ -435,3 +435,75 @@ pub fn install_qwen(app: &AppHandle) -> Result<Value, String> {
     emit_log(app, "qwen", "Qwen3-TTS prêt ✓");
     Ok(probe())
 }
+
+// ── Speech-to-text engines ───────────────────────────────────────────────────
+
+/// (id, label, detail) for every STT engine `vox_stt.py` can run
+/// (`VOX_STT_MODEL`). Sizes are the on-disk download.
+pub const STT_MODELS: &[(&str, &str, &str)] = &[
+    ("whisper-small", "Whisper small", "rapide · ~0,5 Go"),
+    ("whisper-large-v3-turbo", "Whisper large-v3 turbo", "précis · ~1,5 Go"),
+    ("parakeet-v3", "Parakeet v3", "très rapide · ~2,3 Go"),
+];
+
+/// (python module, pip package, python snippet that loads/downloads the weights)
+fn stt_spec(id: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    match id {
+        "whisper-small" => Some(("whisper", "openai-whisper",
+            "import whisper; whisper.load_model('small'); print('loaded')")),
+        "whisper-large-v3-turbo" => Some(("mlx_whisper", "mlx-whisper",
+            "from huggingface_hub import snapshot_download as d; \
+             d('mlx-community/whisper-large-v3-turbo'); print('loaded')")),
+        "parakeet-v3" => Some(("parakeet_mlx", "parakeet-mlx",
+            "from parakeet_mlx import from_pretrained as f; \
+             f('mlx-community/parakeet-tdt-0.6b-v3'); print('loaded')")),
+        _ => None,
+    }
+}
+
+/// Is the engine's python package present in the shared venv? (Weights are
+/// fetched by `install_stt`; the daemon would also pull them on first load.)
+pub fn stt_installed(id: &str) -> bool {
+    let py = venv_python();
+    match stt_spec(id) {
+        Some((module, _, _)) => is_executable(&py) && venv_has(&py, module),
+        None => false,
+    }
+}
+
+/// Install an STT engine into the shared `~/.vox/venv` and pre-download its
+/// weights so the first dictation doesn't stall on a multi-GB transfer.
+pub fn install_stt(app: &AppHandle, id: &str) -> Result<Value, String> {
+    let (_, pkg, load_code) = stt_spec(id).ok_or_else(|| format!("modèle STT inconnu : {id}"))?;
+    let venv_py = venv_python();
+    if !is_executable(&venv_py) {
+        return Err("environnement Python Vox introuvable — lance d'abord l'installation".into());
+    }
+    emit_log(app, "stt", &format!("Installation du moteur {id}…"));
+    run_quiet(
+        &venv_py,
+        &["-m", "pip", "install", "--disable-pip-version-check", "--no-input",
+          "--progress-bar", "off", pkg],
+        "stt",
+        app,
+    )?;
+
+    // Loading the model IS the download — and proves it works on this machine.
+    // Same HF_HOME as the daemon so the cache is shared.
+    emit_log(app, "stt", "Téléchargement du modèle…");
+    let mut child = Command::new(&venv_py)
+        .args(["-c", load_code])
+        .env("HF_HOME", home().join(".vox/hf"))
+        .env("HF_HUB_DISABLE_TELEMETRY", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    stream_lines(&mut child, app, "stt");
+    if !child.wait().map_err(|e| e.to_string())?.success() {
+        return Err(format!("le téléchargement du modèle {id} a échoué"));
+    }
+
+    emit_log(app, "stt", &format!("{id} prêt ✓"));
+    Ok(json!({ "ok": true, "model": id }))
+}

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Benchmark corpus — sentences Vox actually says, not invented ones.
 
-Transcribed from `conductor::build_brief_sentences` and the recap intros, plus
+Transcribed from `ade::build_brief_sentences` and the recap intros, plus
 the announcement templates from `announce::headline`, with real project names
 substituted.
 

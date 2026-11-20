@@ -4,9 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Vox — Voice orchestrator for your coding agents</title>
-<meta name="description" content="Vox is a macOS floating voice pill that briefs you on every Conductor worktree, drafts prompts by voice, and runs 100% locally — Whisper, Ollama, Kokoro/Piper. No cloud calls.">
+<meta name="description" content="Vox is a macOS floating voice pill that briefs you on every Orca worktree, drafts prompts by voice, and runs 100% locally — Whisper, Ollama, Kokoro/Piper. No cloud calls.">
 <meta property="og:title" content="Vox — Voice orchestrator for your coding agents">
-<meta property="og:description" content="A floating pill that watches your Conductor worktrees, briefs you out loud, and launches the next agent. 100% local. macOS 12+, Apple Silicon, MIT.">
+<meta property="og:description" content="A floating pill that watches your Orca worktrees, briefs you out loud, and launches the next agent. 100% local. macOS 12+, Apple Silicon, MIT.">
 <meta property="og:type" content="website">
 <link rel="icon" href="data:,">
 <style>
@@ -527,7 +527,7 @@
       <span class="eyebrow">v0.3.0 · streaming TTS, live carousel</span>
       <h1 class="hero-title">Vox</h1>
       <p class="hero-tagline">Voice orchestrator for your coding agents.</p>
-      <p class="hero-sub">A floating pill that watches your Conductor worktrees, briefs you out loud, and drafts the next prompt — hands-free, entirely on your Mac.</p>
+      <p class="hero-sub">A floating pill that watches your Orca worktrees, briefs you out loud, and drafts the next prompt — hands-free, entirely on your Mac.</p>
 
       <div class="hero-ctas">
         <a class="btn-primary" href="https://github.com/justeozan/vox/releases/latest">
@@ -588,14 +588,14 @@
     <div class="wrap">
       <div class="section-head">
         <div class="section-kicker">What it does</div>
-        <h2 class="section-title">Built to sit next to Conductor, not replace it</h2>
+        <h2 class="section-title">Built to sit next to Orca, not replace it</h2>
         <p class="section-desc">Vox reads the state of your worktrees and gives you a voice interface to act on it.</p>
       </div>
       <div class="features-grid">
         <div class="card">
           <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9"/><path d="M3 3v6h6"/><path d="M12 7v5l3 3"/></svg></div>
           <h3>Full worktree recap on launch</h3>
-          <p>Reads Conductor's SQLite DB read-only and speaks a recap of every active worktree: who's working, who's idle or errored, and what each agent last said.</p>
+          <p>Asks Orca what every worktree is doing — one CLI call — and speaks a recap: who's working, who's blocked on you, who errored, and what each agent last said.</p>
         </div>
         <div class="card">
           <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M8 22h8"/><rect x="7" y="2" width="10" height="14" rx="5"/><path d="M5 11a7 7 0 0 0 14 0"/></svg></div>
@@ -641,7 +641,7 @@
           <div class="stack-row"><span class="stack-role">Voice — English</span><span class="stack-name">Kokoro TTS</span></div>
           <div class="stack-row"><span class="stack-role">Voice — French</span><span class="stack-name">Piper TTS</span></div>
           <div class="stack-row"><span class="stack-role">Fallback voice</span><span class="stack-name">macOS <code>say</code></span></div>
-          <div class="stack-row"><span class="stack-role">Worktree data</span><span class="stack-name">Conductor's SQLite DB, read-only</span></div>
+          <div class="stack-row"><span class="stack-role">Worktree data</span><span class="stack-name">Orca CLI, JSON</span></div>
         </div>
       </div>
     </div>
@@ -718,7 +718,7 @@
       { cls: 'st-idle',      label: '⌥ space',        caption: 'Option + Space to talk. Vox listens, thinks, and answers out loud.', dur: 2600 },
       { cls: 'st-listening', label: 'listening…',      caption: '"Where\'s the auth worktree at?"', dur: 3000 },
       { cls: 'st-speaking',  label: 'replying…',       caption: 'Streaming TTS — Vox answers as it thinks, not after.', dur: 3000 },
-      { cls: 'st-running',   label: '3 agents active', caption: 'Live recap of every Conductor worktree, grouped and varied.', dur: 3000 }
+      { cls: 'st-running',   label: '3 agents active', caption: 'Live recap of every Orca worktree, grouped and varied.', dur: 3000 }
     ];
     var idx = 0;
 

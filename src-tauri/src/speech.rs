@@ -46,7 +46,7 @@ fn apply_pronunciations(text: &str) -> String {
 /// One unit of a queued speech session.
 pub enum SpeechItem {
     /// A sentence to synthesize and play, optionally tagged with the
-    /// Conductor project it talks about (drives the renderer carousel).
+    /// project it talks about (drives the renderer carousel).
     Sentence { text: String, workspace: Option<String> },
     /// No more sentences will come; the session ends after the queue drains.
     End,
@@ -124,12 +124,24 @@ pub fn split_sentences(text: &str) -> Vec<String> {
 // ── STT ──────────────────────────────────────────────────────────────────────
 
 pub fn transcribe(state: &Arc<AppState>, wav: &Path) -> String {
+    transcribe_with_prompt(state, wav, None)
+}
+
+/// `prompt` replaces the daemon's default Whisper initial prompt (dictation
+/// primes it with the user's vocabulary). Sent as `path<TAB>prompt` — a bare
+/// path keeps the old protocol.
+pub fn transcribe_with_prompt(state: &Arc<AppState>, wav: &Path, prompt: Option<&str>) -> String {
+    let mut line = wav.to_string_lossy().to_string();
+    if let Some(p) = prompt.map(|p| p.replace(['\t', '\n', '\r'], " ")).filter(|p| !p.trim().is_empty()) {
+        line.push('\t');
+        line.push_str(p.trim());
+    }
     // Prefer daemon (in-memory model, no CLI cold start)
     {
         let mut guard = state.stt.lock().unwrap();
         if let Some(d) = guard.as_mut() {
             if d.is_ready() {
-                if let Some(line) = d.request(&wav.to_string_lossy(), Duration::from_secs(60)) {
+                if let Some(line) = d.request(&line, Duration::from_secs(60)) {
                     if line == "EMPTY" || line.starts_with("ERROR:") {
                         return String::new();
                     }

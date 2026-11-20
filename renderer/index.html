@@ -55,13 +55,19 @@
   body.announcing .shell { border-color: rgba(167,139,250,0.38); box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 16px rgba(167,139,250,0.20); }
   body.active    .shell { border-color: rgba(74,222,128,0.32); }
   body.listening .shell { border-color: rgba(74,222,128,0.6);  animation: shellPulseGreen 2.2s ease-in-out infinite; }
-  body.thinking  .shell { border-color: rgba(245,158,11,0.5); }
+  body.thinking  .shell, body.dictation-processing .shell { border-color: rgba(245,158,11,0.5); }
+  /* Dictation (typing mode): rose, the one hue the assistant states don't use. */
+  body.dictating .shell { border-color: rgba(244,114,182,0.6); animation: shellPulseRose 2.2s ease-in-out infinite; }
   body.speaking  .shell { border-color: rgba(96,165,250,0.55); animation: shellPulseBlue 2.6s ease-in-out infinite; }
   body.running   .shell { border-color: rgba(167,139,250,0.4); }
 
   @keyframes shellPulseGreen {
     0%, 100% { box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 14px rgba(74,222,128,0.14); }
     50%      { box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 28px rgba(74,222,128,0.34); }
+  }
+  @keyframes shellPulseRose {
+    0%, 100% { box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 14px rgba(244,114,182,0.14); }
+    50%      { box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 28px rgba(244,114,182,0.32); }
   }
   @keyframes shellPulseBlue {
     0%, 100% { box-shadow: inset 0 1px 0 rgba(255,255,255,0.09), inset 0 0 14px rgba(96,165,250,0.12); }
@@ -294,6 +300,98 @@
   select.setting-select:focus { border-color: rgba(167,139,250,0.6); }
   select.setting-select:active { transform: scale(0.97); }
 
+  /* Dictation rows: a hint under the label, and the vocabulary editor. */
+  .setting-label-col { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .setting-hint { font-size: 10.5px; color: rgba(255,255,255,0.38); }
+  .setting-row.vocab { flex-direction: column; align-items: stretch; gap: 6px; }
+  .vocab-cols { display: flex; gap: 8px; }
+  .vocab-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .vocab-col .setting-hint { text-transform: uppercase; letter-spacing: 0.08em; font-size: 9.5px; }
+  textarea.vocab-area {
+    -webkit-appearance: none;
+    appearance: none;
+    resize: none;
+    height: 58px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.10);
+    color: #fff;
+    font-size: 11.5px;
+    line-height: 1.4;
+    font-family: inherit;
+    padding: 6px 9px;
+    border-radius: 9px;
+    outline: none;
+    transition: border-color 0.2s, background-color 0.2s;
+  }
+  textarea.vocab-area:focus { border-color: rgba(244,114,182,0.55); }
+
+  /* Settings v2: grouped, scrollable body, per-row reset. */
+  .settings-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 2px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,0.12) transparent;
+  }
+  .setting-group { margin-bottom: 12px; }
+  .group-title {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: rgba(167,139,250,0.7);
+    padding: 2px 0 2px;
+  }
+  .row-ctl { display: flex; align-items: center; gap: 6px; flex-shrink: 0; min-width: 0; }
+  .reset-btn {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    border: none;
+    color: rgba(255,255,255,0.45);
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1;
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    cursor: pointer;
+    visibility: hidden;
+    flex-shrink: 0;
+    transition: color 0.2s, background 0.2s;
+  }
+  .reset-btn.show { visibility: visible; }
+  .reset-btn:hover { color: #d9ceff; background: rgba(167,139,250,0.16); }
+  .setting-row.vocab .vocab-head {
+    display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none;
+  }
+  .vocab-head .setting-label { flex: 1; }
+  .vocab-chev { font-size: 9px; color: rgba(255,255,255,0.4); width: 10px; transition: transform 0.2s; }
+  .setting-row.vocab.open .vocab-chev { transform: rotate(90deg); }
+  .setting-warn {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    margin: 6px 0 4px;
+    padding: 8px 10px;
+    border-radius: 9px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: rgba(255,226,170,0.9);
+    background: rgba(245,158,11,0.09);
+    border: 1px solid rgba(245,158,11,0.28);
+  }
+  .setting-warn .update-btn { flex-shrink: 0; padding: 5px 10px; }
+  .setting-hint.err { color: #f87171; }
+  .setting-hint.busy { color: rgba(245,158,11,0.8); }
+  .reset-all-wrap { text-align: center; padding: 8px 0 6px; border-top: 1px solid rgba(255,255,255,0.05); }
+  .reset-all {
+    -webkit-appearance: none; appearance: none;
+    background: none; border: none; font-family: inherit;
+    font-size: 11px; color: rgba(255,255,255,0.38);
+    cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
+  }
+  .reset-all:hover { color: rgba(248,113,113,0.9); }
+
   .segment {
     display: inline-flex;
     background: rgba(255,255,255,0.05);
@@ -356,12 +454,15 @@
   }
   body.active .dot    { background: var(--green);  box-shadow: 0 0 6px rgba(74,222,128,0.4); }
   body.listening .dot { background: var(--green);  box-shadow: 0 0 12px rgba(74,222,128,0.7); transform: scale(1.15); }
-  body.thinking .dot  { background: var(--amber);  box-shadow: 0 0 9px rgba(245,158,11,0.6); animation: dotThink 1s ease-in-out infinite; }
+  body.dictating .dot { background: #f472b6; box-shadow: 0 0 12px rgba(244,114,182,0.7); transform: scale(1.15); }
+  body.thinking .dot, body.dictation-processing .dot { background: var(--amber);  box-shadow: 0 0 9px rgba(245,158,11,0.6); animation: dotThink 1s ease-in-out infinite; }
   body.speaking .dot  { background: var(--blue);   box-shadow: 0 0 9px rgba(96,165,250,0.6); }
   body.running .dot   { background: var(--violet); box-shadow: 0 0 9px rgba(167,139,250,0.6); }
   body.boot .dot      { background: var(--boot);   box-shadow: 0 0 16px rgba(196,181,253,0.95); animation: bootDot 1s var(--spring); }
   body.announcing .dot { background: var(--violet); box-shadow: 0 0 12px rgba(167,139,250,0.75); animation: bootDot 0.7s var(--spring); }
 
+  body.dictating .ring { border-color: #f472b6; }
+  body.dictating .ring.r1 { animation: ripple 1.8s ease-out infinite; }
   body.listening .ring.r1 { animation: ripple 1.6s ease-out infinite; }
   body.listening .ring.r2 { animation: ripple 1.6s ease-out 0.55s infinite; }
   body.speaking .ring.r1  { border-color: var(--blue); animation: ripple 2s ease-out infinite; }
@@ -400,7 +501,8 @@
   }
   body.active .waveform span    { background: rgba(74,222,128,0.30); }
   body.listening .waveform span { background: rgba(74,222,128,0.75); }
-  body.thinking .waveform span  { background: rgba(245,158,11,0.5); }
+  body.thinking .waveform span, body.dictation-processing .waveform span { background: rgba(245,158,11,0.5); }
+  body.dictating .waveform span { background: rgba(244,114,182,0.75); }
   body.speaking .waveform span  { background: rgba(96,165,250,0.7); }
   body.running .waveform span   { background: rgba(167,139,250,0.4); }
   body.boot .waveform span      { background: rgba(196,181,253,0.9); }
@@ -496,7 +598,8 @@
   }
   body.active .label    { color: rgba(74,222,128,0.6); }
   body.listening .label { color: rgba(74,222,128,0.9); }
-  body.thinking .label  { color: rgba(245,158,11,0.7); background: linear-gradient(90deg, rgba(245,158,11,0.5), #ffd188, rgba(245,158,11,0.5)); background-size: 200% 100%; -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: shimmer 1.6s linear infinite; }
+  body.dictating .label { color: rgba(244,114,182,0.95); }
+  body.thinking .label, body.dictation-processing .label { color: rgba(245,158,11,0.7); background: linear-gradient(90deg, rgba(245,158,11,0.5), #ffd188, rgba(245,158,11,0.5)); background-size: 200% 100%; -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: shimmer 1.6s linear infinite; }
   body.speaking .label  { color: rgba(96,165,250,0.8); }
   body.running .label   { color: rgba(167,139,250,0.9); }
   body.boot .label      { color: rgba(196,181,253,0.95); }
@@ -675,42 +778,142 @@
       <div class="settings-title" id="settings-title">paramètres</div>
       <div class="settings-hint"><kbd>⌘</kbd><kbd>,</kbd></div>
     </div>
-    <div class="setting-row">
-      <div class="setting-label" id="lbl-provider">IA</div>
-      <div class="setting-pair">
-        <select id="provider-select" class="setting-select"></select>
-        <select id="model-select" class="setting-select"></select>
+    <div class="settings-body" id="settings-body">
+
+      <div class="setting-group" id="grp-dictation">
+        <div class="group-title" id="grp-dictation-title">Dictée</div>
+        <div class="setting-warn" id="warn-acc" style="display:none">
+          <span id="warn-acc-text"></span>
+          <button class="update-btn" id="warn-acc-btn"></button>
+        </div>
+        <div class="setting-warn" id="warn-fn" style="display:none">
+          <span id="warn-fn-text"></span>
+          <button class="update-btn" id="warn-fn-btn"></button>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label-col">
+            <div class="setting-label" id="lbl-dict-key">Touche</div>
+            <div class="setting-hint" id="hint-dictation"></div>
+          </div>
+          <div class="row-ctl">
+            <select id="dict-key-select" class="setting-select"></select>
+            <button class="reset-btn" data-reset="dictation_key">↺</button>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label-col">
+            <div class="setting-label" id="lbl-stt-model">Modèle de transcription</div>
+            <div class="setting-hint" id="stt-progress" style="display:none"></div>
+          </div>
+          <div class="row-ctl">
+            <select id="stt-model-select" class="setting-select"></select>
+            <button class="reset-btn" data-reset="stt_model">↺</button>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label" id="lbl-dict-cleanup">Nettoyage</div>
+          <div class="row-ctl">
+            <select id="dictation-format-select" class="setting-select"></select>
+            <button class="reset-btn" data-reset="dictation_format">↺</button>
+          </div>
+        </div>
+        <div class="setting-row vocab" id="row-vocab">
+          <div class="vocab-head" id="vocab-head">
+            <span class="vocab-chev" id="vocab-chev">▸</span>
+            <span class="setting-label" id="lbl-vocab">Vocabulaire</span>
+            <button class="reset-btn" id="vocab-reset">↺</button>
+          </div>
+          <div class="vocab-cols" id="vocab-cols" style="display:none">
+            <div class="vocab-col">
+              <div class="setting-hint" id="lbl-vocab-words">Mots</div>
+              <textarea id="vocab-words" class="vocab-area" spellcheck="false" placeholder="Orivo&#10;Tauri"></textarea>
+            </div>
+            <div class="vocab-col">
+              <div class="setting-hint" id="lbl-vocab-repl">Remplacements</div>
+              <textarea id="vocab-repl" class="vocab-area" spellcheck="false" placeholder="from => to"></textarea>
+            </div>
+          </div>
+        </div>
       </div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label" id="lbl-lang">Langue</div>
-      <div class="segment" id="lang-segment">
-        <button data-lang="fr">FR</button>
-        <button data-lang="en">EN</button>
+
+      <div class="setting-group">
+        <div class="group-title" id="grp-voice-title">Voix</div>
+        <div class="setting-row">
+          <div class="setting-label" id="lbl-lang">Langue</div>
+          <div class="row-ctl">
+            <div class="segment" id="lang-segment">
+              <button data-lang="fr">FR</button>
+              <button data-lang="en">EN</button>
+            </div>
+            <button class="reset-btn" data-reset="language">↺</button>
+          </div>
+        </div>
+        <div class="setting-row" id="row-tts-engine" style="display:none">
+          <div class="setting-label" id="lbl-tts-engine">Voix</div>
+          <div class="row-ctl">
+            <select id="tts-engine-select" class="setting-select"></select>
+            <button class="reset-btn" data-reset="tts_engine">↺</button>
+          </div>
+        </div>
       </div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label" id="lbl-agent-reply">Réponse d'agent</div>
-      <div class="segment" id="agent-reply-segment">
-        <button data-reply="summary">RÉSUMÉ</button>
-        <button data-reply="verbatim">MOT POUR MOT</button>
+
+      <div class="setting-group">
+        <div class="group-title" id="grp-brain-title">Cerveau</div>
+        <div class="setting-row">
+          <div class="setting-label" id="lbl-provider">IA</div>
+          <div class="row-ctl" style="flex:1;min-width:0;justify-content:flex-end">
+            <div class="setting-pair">
+              <select id="provider-select" class="setting-select"></select>
+              <select id="model-select" class="setting-select"></select>
+            </div>
+            <button class="reset-btn" data-reset="provider,model">↺</button>
+          </div>
+        </div>
       </div>
-    </div>
-    <div class="setting-row" id="row-tts-engine" style="display:none">
-      <div class="setting-label" id="lbl-tts-engine">Voix</div>
-      <select id="tts-engine-select" class="setting-select"></select>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label" id="lbl-version">Version</div>
-      <div class="setting-value" id="app-version">—</div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label" id="lbl-update">Mises à jour</div>
-      <button class="update-btn" id="update-btn">Vérifier</button>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label" id="lbl-setup">Installation</div>
-      <button class="update-btn" id="setup-repair-btn">Vérifier</button>
+
+      <div class="setting-group">
+        <div class="group-title" id="grp-agents-title">Agents</div>
+        <div class="setting-row">
+          <div class="setting-label" id="lbl-agent-reply">Réponse d'agent</div>
+          <div class="row-ctl">
+            <div class="segment" id="agent-reply-segment">
+              <button data-reply="summary">RÉSUMÉ</button>
+              <button data-reply="verbatim">MOT POUR MOT</button>
+            </div>
+            <button class="reset-btn" data-reset="agent_reply">↺</button>
+          </div>
+        </div>
+        <div class="setting-row" id="row-agent-launch" style="display:none">
+          <div class="setting-label" id="lbl-agent-launch">Lancement</div>
+          <div class="row-ctl">
+            <div class="segment" id="agent-launch-segment">
+              <button data-launch="native">DANS ORCA</button>
+              <button data-launch="headless">DISCRET</button>
+            </div>
+            <button class="reset-btn" data-reset="agent_launch">↺</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="setting-group">
+        <div class="group-title" id="grp-app-title">Application</div>
+        <div class="setting-row">
+          <div class="setting-label" id="lbl-version">Version</div>
+          <div class="setting-value" id="app-version">—</div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label" id="lbl-update">Mises à jour</div>
+          <button class="update-btn" id="update-btn">Vérifier</button>
+        </div>
+        <div class="setting-row">
+          <div class="setting-label" id="lbl-setup">Installation</div>
+          <button class="update-btn" id="setup-repair-btn">Vérifier</button>
+        </div>
+        <div class="reset-all-wrap">
+          <button class="reset-all" id="reset-all">Tout réinitialiser</button>
+        </div>
+      </div>
+
     </div>
   </div>
 
@@ -776,8 +979,8 @@ const SPEECH_SNR         = 2.2
 // for the least information: nothing about the pill's meaning changes when the
 // cursor arrives. The gear buttons now reveal inside this width.
 const SIZE_BASE     = [408, 56]
-const SIZE_SETTINGS = [500, 437]  // 6 rows × ~41px + header/padding
-const SETTINGS_ROW_H = 41         // 10px padding ×2 + 40px min-height + 1px border
+// Fixed height: the grouped panel scrolls inside itself instead of growing the window.
+const SIZE_SETTINGS = [500, 560]
 const SIZE_SETUP    = [520, 470]
 
 // ── State machine ─────────────────────────────────────────────────────────────
@@ -801,12 +1004,28 @@ const LABEL_TABLE = {
     idle: '⌥ space', active: 'à l\'écoute', listening: 'je t\'entends…',
     thinking: 'réflexion…', speaking: 'réponse…', running: 'agents actifs',
     boot: 'récap en cours…', announcing: 'annonce…',
+    dictating: '✎ dictée', 'dictation-processing': '✎ …',
+    dictation: 'Dictée', dictHint: 'Maintenir pour dicter · double-tap pour mains libres · Échap annule',
+    dictLlm: 'Nettoyage LLM', dictRaw: 'Transcription brute',
+    vocabWords: 'Mots (un par ligne)', vocabRepl: 'Remplacements (de => vers)',
+    dictLatched: '%s pour finir · Échap annule',
+    grpDict: 'Dictée', grpVoice: 'Voix', grpBrain: 'Cerveau', grpAgents: 'Agents', grpApp: 'Application',
+    dictKey: 'Touche', sttModel: 'Modèle de transcription', dictCleanup: 'Nettoyage', vocab: 'Vocabulaire',
+    toInstall: 'à installer', installing: 'installation…',
+    resetTip: 'Réinitialiser', resetAll: 'Tout réinitialiser',
+    resetAllConfirm: 'Réinitialiser tous les réglages (et vider le vocabulaire) ?',
+    vocabResetConfirm: 'Vider le vocabulaire ?',
+    accWarn: 'Accessibilité non accordée : Vox ne peut pas coller le texte dicté.', accBtn: 'Autoriser',
+    fnWarn: 'Pour utiliser Fn : Réglages Système → Clavier → « Appuyer sur 🌐 pour » → « Ne rien faire ».', fnBtn: 'Ouvrir',
+    dictKeys: { fn: 'Fn (🌐)', right_option: '⌥ droite', right_command: '⌘ droite', right_shift: '⇧ droite', alt_shift_space: '⌥⇧Espace' },
+    dictKeysShort: { fn: 'fn', right_option: '⌥ droite', right_command: '⌘ droite', right_shift: '⇧ droite', alt_shift_space: '⌥⇧Espace' },
     settingsTitle: 'paramètres', model: 'Modèle', lang: 'Langue',
     version: 'Version', update: 'Mises à jour', provider: 'IA',
     provOllama: 'Local (Ollama)', provClaudeCli: 'Claude (abonnement)',
     provCodexCli: 'Codex (abonnement)', provAnthropic: 'Claude (clé API)',
     provOpenai: 'OpenAI (clé API)',
     agentReply: 'Réponse d\'agent', replySummary: 'RÉSUMÉ', replyVerbatim: 'MOT POUR MOT',
+    agentLaunch: 'Lancement', launchNative: 'DANS %s', launchHeadless: 'DISCRET',
     ttsEngine: 'Voix', engAuto: 'Automatique', engKokoro: 'Kokoro', engPiper: 'Piper',
     engQwen: 'Qwen3 (test)', engSay: 'macOS (say)',
     check: 'Vérifier', checking: '…', upToDate: 'À jour', download: 'Télécharger',
@@ -818,12 +1037,28 @@ const LABEL_TABLE = {
     idle: '⌥ space', active: 'listening', listening: 'I hear you…',
     thinking: 'thinking…', speaking: 'replying…', running: 'agents active',
     boot: 'briefing…', announcing: 'heads up…',
+    dictating: '✎ dictating', 'dictation-processing': '✎ …',
+    dictation: 'Dictation', dictHint: 'Hold to dictate · double-tap for hands-free · Esc cancels',
+    dictLlm: 'LLM cleanup', dictRaw: 'Raw transcript',
+    vocabWords: 'Words (one per line)', vocabRepl: 'Replacements (from => to)',
+    dictLatched: '%s to finish · Esc cancels',
+    grpDict: 'Dictation', grpVoice: 'Voice', grpBrain: 'Brain', grpAgents: 'Agents', grpApp: 'App',
+    dictKey: 'Key', sttModel: 'Transcription model', dictCleanup: 'Cleanup', vocab: 'Vocabulary',
+    toInstall: 'to install', installing: 'installing…',
+    resetTip: 'Reset', resetAll: 'Reset everything',
+    resetAllConfirm: 'Reset all settings (and clear the vocabulary)?',
+    vocabResetConfirm: 'Clear the vocabulary?',
+    accWarn: 'Accessibility not granted: Vox cannot paste dictated text.', accBtn: 'Allow',
+    fnWarn: 'To use Fn: System Settings → Keyboard → “Press 🌐 to” → “Do Nothing”.', fnBtn: 'Open',
+    dictKeys: { fn: 'Fn (🌐)', right_option: 'Right ⌥', right_command: 'Right ⌘', right_shift: 'Right ⇧', alt_shift_space: '⌥⇧Space' },
+    dictKeysShort: { fn: 'fn', right_option: 'right ⌥', right_command: 'right ⌘', right_shift: 'right ⇧', alt_shift_space: '⌥⇧Space' },
     settingsTitle: 'settings', model: 'Model', lang: 'Language',
     version: 'Version', update: 'Updates', provider: 'AI',
     provOllama: 'Local (Ollama)', provClaudeCli: 'Claude (subscription)',
     provCodexCli: 'Codex (subscription)', provAnthropic: 'Claude (API key)',
     provOpenai: 'OpenAI (API key)',
     agentReply: 'Agent reply', replySummary: 'SUMMARY', replyVerbatim: 'VERBATIM',
+    agentLaunch: 'Launch', launchNative: 'IN %s', launchHeadless: 'QUIET',
     ttsEngine: 'Voice', engAuto: 'Automatic', engKokoro: 'Kokoro', engPiper: 'Piper',
     engQwen: 'Qwen3 (test)', engSay: 'macOS (say)',
     check: 'Check', checking: '…', upToDate: 'Up to date', download: 'Download',
@@ -878,6 +1113,9 @@ function bodyClasses() {
 const UI_CODES = {
   idle: 0, active: 1, listening: 2, thinking: 3,
   speaking: 4, running: 5, boot: 6, announcing: 7,
+  // Dictation has no code of its own on the Rust side: report it as a busy
+  // turn so Vox never speaks unprompted over the user's typing.
+  dictating: 2, 'dictation-processing': 3,
 }
 
 function setState(s) {
@@ -939,7 +1177,11 @@ function animateWaveform(s) {
         h = 4 + Math.abs(Math.sin(t / 1600 + i * 0.32)) * 4
       } else if (s === 'listening') {
         h = 6 + Math.abs(Math.sin(t / 105 + i * 0.75)) * 23
-      } else if (s === 'thinking') {
+      } else if (s === 'dictating') {
+        // Driven by the native mic level (dictation-level event), with a little motion so quiet moments still breathe.
+        const lvl = dictLevel()
+        h = 4 + Math.min(1, lvl * 1.6) * (6 + Math.abs(Math.sin(t / 110 + i * 0.7)) * 20)
+      } else if (s === 'thinking' || s === 'dictation-processing') {
         const phase = (t / 260 + i * 0.5) % (BAR_COUNT * 0.5)
         h = 4 + Math.max(0, 21 - Math.abs(phase - BAR_COUNT * 0.25) * 3)
       } else if (s === 'speaking') {
@@ -1289,7 +1531,7 @@ function interruptSpeech() {
 
 async function toggleVox() {
   // During first-run setup the pill only shows install progress.
-  if (setupOpen) return
+  if (setupOpen || dictBusy()) return
   // ⌥Space stops the startup recap (boot), a reply being spoken (speaking), or
   // an unprompted announcement. 'thinking' stays a no-op: interrupting an
   // in-flight LLM call and letting a new turn start would race the abandoned
@@ -1307,13 +1549,100 @@ async function toggleVox() {
   }
 }
 
+// ── Dictation (configurable key → text pasted at the cursor) ─────────────────
+// Fully native: Rust owns the key, the recording (with pre-roll), the
+// transcription and the paste. This side only reflects state: pill colours, the
+// live level in the waveform, hints. It never opens the mic for dictation.
+let dictHideTimer = null
+let dictKey = 'fn'
+let dictLvlTarget = 0, dictLvlSmooth = 0, dictLvlAt = 0
+
+function dictBusy() { return state === 'dictating' || state === 'dictation-processing' }
+
+function dictKeyShort(key) {
+  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+  return (L.dictKeysShort && L.dictKeysShort[key]) || key || 'fn'
+}
+
+// Smoothed live level (0..1) from the `dictation-level` event; fast attack, slow
+// release, and it decays by itself if events stop arriving.
+function dictLevel() {
+  if (Date.now() - dictLvlAt > 250) dictLvlTarget = 0
+  const k = dictLvlTarget > dictLvlSmooth ? 0.5 : 0.15
+  dictLvlSmooth += (dictLvlTarget - dictLvlSmooth) * k
+  return dictLvlSmooth
+}
+
+function dictRestState() { return agentCount > 0 ? 'running' : 'idle' }
+
+function startDictation(app, key) {
+  clearTimeout(dictHideTimer)
+  if (key) dictKey = key
+  dictLvlTarget = dictLvlSmooth = 0
+  // Quiet Vox: whatever it was saying or about to say must not reach the mic.
+  if (currentAudio) { try { currentAudio.pause() } catch {}; currentAudio = null }
+  if (state === 'speaking' || state === 'boot' || state === 'announcing') {
+    invoke('interrupt').catch(() => {})
+  }
+  closeCarousel(0)
+  // End an active ⌥Space session cleanly (releases its mic, resets VAD state).
+  // A turn still 'thinking' is simply superseded: its late speaking-* / play-wav
+  // events are ignored while dictating (see guards in the listeners).
+  if (micStream) deactivateVox()
+  hideTranscript()
+  setState('dictating')
+  if (app) setLabel('✎ ' + app)
+}
+
+function stopDictation() {
+  if (state !== 'dictating') return      // stale event
+  dictLvlTarget = 0
+  setState('dictation-processing')
+  hideTranscript()
+}
+
+function cancelDictation() {
+  dictLvlTarget = 0
+  hideTranscript()
+  if (dictBusy()) setState(dictRestState())
+}
+
+function finishDictation(p) {
+  if (state === 'dictating') return      // a newer dictation already started
+  hideTranscript()
+  if (dictBusy()) setState(dictRestState())
+  const text = ((p && p.text) || '').trim()
+  voxIsShowing = false
+  if (p && p.ok && text) showTranscript(text, 2800)
+  else if (p && !p.ok) showTranscript((uiLang === 'en' ? 'dictation failed — ' : 'dictée échouée — ') + ((p.error || '').trim() || '?'), 4000)
+}
+
+listen('dictation-start', (e) => {
+  const pl = e.payload || {}
+  startDictation((pl.app || '').trim(), pl.key)
+})
+listen('dictation-level', (e) => {
+  const v = Number((e.payload || {}).level)
+  if (!isFinite(v)) return
+  dictLvlTarget = Math.max(0, Math.min(1, v))
+  dictLvlAt = Date.now()
+})
+listen('dictation-stop', () => { stopDictation() })
+listen('dictation-cancel', () => { cancelDictation() })
+listen('dictation-latched', () => {
+  if (state !== 'dictating') return
+  voxIsShowing = false
+  showTranscript((LABEL_TABLE[uiLang] || LABEL_TABLE.fr).dictLatched.replace('%s', dictKeyShort(dictKey)), 0)
+})
+listen('dictation-done', (e) => { finishDictation(e.payload) })
+
 // ── Window sizing (hover grow / settings / carousel) ─────────────────────────
 function syncWindow() {
   let w, h
   if (setupOpen) {
     ;[w, h] = SIZE_SETUP
   } else if (settingsOpen) {
-    ;[w, h] = [SIZE_SETTINGS[0], SIZE_SETTINGS[1] + (engineRowVisible ? SETTINGS_ROW_H : 0)]
+    ;[w, h] = SIZE_SETTINGS
   } else if (carouselOpen) {
     const cards = carouselEl.children.length
     w = 500
@@ -1600,6 +1929,10 @@ document.getElementById('setup-repair-btn').addEventListener('click', async () =
 const modelSelect = document.getElementById('model-select')
 const langSegment = document.getElementById('lang-segment')
 const agentReplySegment = document.getElementById('agent-reply-segment')
+const agentLaunchSegment = document.getElementById('agent-launch-segment')
+// Filled by load(); the native button names the ADE it would launch into, so the
+// label can't be a static string.
+let adeInfo = { label: 'Orca', can_launch_natively: false }
 const providerSelect = document.getElementById('provider-select')
 const PROVIDERS = ['ollama', 'claude-cli', 'codex-cli', 'anthropic', 'openai']
 const PROVIDER_LABEL = {
@@ -1624,12 +1957,80 @@ function renderProviderOptions(current) {
   providerSelect.value = current || 'ollama'
 }
 
+const dictFormatSelect = document.getElementById('dictation-format-select')
+const vocabWordsEl = document.getElementById('vocab-words')
+const vocabReplEl = document.getElementById('vocab-repl')
 const engineSelect = document.getElementById('tts-engine-select')
 const engineRow = document.getElementById('row-tts-engine')
 const ENGINE_KEYS = ['auto', 'kokoro', 'piper', 'qwen3', 'say']
 const ENGINE_LABEL = { auto: 'engAuto', kokoro: 'engKokoro', piper: 'engPiper',
                        qwen3: 'engQwen', say: 'engSay' }
 let engineRowVisible = false
+
+const dictKeySelect = document.getElementById('dict-key-select')
+const sttSelect = document.getElementById('stt-model-select')
+const sttProgress = document.getElementById('stt-progress')
+const DICT_KEYS = ['fn', 'right_option', 'right_command', 'right_shift', 'alt_shift_space']
+let sttModels = []          // [{id,label,detail,installed}]
+let sttInstalling = null    // model id while install_stt runs
+
+function setText(id, txt) { const el = document.getElementById(id); if (el) el.textContent = txt }
+
+function renderSttOptions() {
+  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+  const cur = sttSelect.value || curSettings.stt_model || 'whisper-small'
+  sttSelect.innerHTML = ''
+  const list = sttModels.length ? sttModels : [{ id: cur, label: cur, installed: true }]
+  for (const m of list) {
+    const o = document.createElement('option')
+    o.value = m.id
+    o.textContent = (m.label || m.id) + (m.installed ? '' : ' · ' + L.toInstall)
+    if (m.detail) o.title = m.detail
+    sttSelect.appendChild(o)
+  }
+  if (!list.some(m => m.id === cur)) {
+    const o = document.createElement('option'); o.value = cur; o.textContent = cur
+    sttSelect.appendChild(o)
+  }
+  sttSelect.value = cur
+}
+
+function renderDictationI18n() {
+  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+  setText('grp-dictation-title', L.grpDict)
+  setText('grp-voice-title', L.grpVoice)
+  setText('grp-brain-title', L.grpBrain)
+  setText('grp-agents-title', L.grpAgents)
+  setText('grp-app-title', L.grpApp)
+  setText('lbl-dict-key', L.dictKey)
+  setText('lbl-stt-model', L.sttModel)
+  setText('lbl-dict-cleanup', L.dictCleanup)
+  setText('lbl-vocab', L.vocab)
+  setText('hint-dictation', L.dictHint)
+  setText('lbl-vocab-words', L.vocabWords)
+  setText('lbl-vocab-repl', L.vocabRepl)
+  setText('reset-all', L.resetAll)
+  setText('warn-acc-text', L.accWarn); setText('warn-acc-btn', L.accBtn)
+  setText('warn-fn-text', L.fnWarn); setText('warn-fn-btn', L.fnBtn)
+  for (const b of document.querySelectorAll('.reset-btn')) b.title = L.resetTip
+  const ck = dictKeySelect.value || curSettings.dictation_key || 'fn'
+  dictKeySelect.innerHTML = ''
+  for (const k of DICT_KEYS) {
+    const o = document.createElement('option')
+    o.value = k; o.textContent = (L.dictKeys && L.dictKeys[k]) || k
+    dictKeySelect.appendChild(o)
+  }
+  dictKeySelect.value = ck
+  const cur = dictFormatSelect.value || 'llm'
+  dictFormatSelect.innerHTML = ''
+  for (const [v, k] of [['llm', 'dictLlm'], ['raw', 'dictRaw']]) {
+    const o = document.createElement('option')
+    o.value = v; o.textContent = L[k]
+    dictFormatSelect.appendChild(o)
+  }
+  dictFormatSelect.value = cur
+  renderSttOptions()
+}
 
 function renderEngineOptions() {
   const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
@@ -1654,8 +2055,15 @@ function applyUiLang() {
   document.getElementById('lbl-provider').textContent = labels.provider
   document.getElementById('lbl-tts-engine').textContent = labels.ttsEngine
   renderEngineOptions()
+  renderDictationI18n()
   for (const b of agentReplySegment.querySelectorAll('button')) {
     b.textContent = b.dataset.reply === 'summary' ? labels.replySummary : labels.replyVerbatim
+  }
+  document.getElementById('lbl-agent-launch').textContent = labels.agentLaunch
+  for (const b of agentLaunchSegment.querySelectorAll('button')) {
+    b.textContent = b.dataset.launch === 'native'
+      ? labels.launchNative.replace('%s', (adeInfo.label || 'Orca').toUpperCase())
+      : labels.launchHeadless
   }
   renderUpdateBtn()
   renderSetupI18n()
@@ -1699,6 +2107,92 @@ updateBtn.addEventListener('click', async () => {
   renderUpdateBtn()
 })
 
+// Current vs default settings drive the per-row reset buttons (↺).
+let curSettings = {}
+let defaultSettings = {}
+
+function refreshResets() {
+  for (const btn of document.querySelectorAll('.reset-btn[data-reset]')) {
+    const keys = btn.dataset.reset.split(',')
+    const differs = keys.some(k =>
+      defaultSettings[k] !== undefined && curSettings[k] !== undefined && curSettings[k] !== defaultSettings[k])
+    btn.classList.toggle('show', differs)
+  }
+}
+
+// Persist a patch, keep the local copy in sync with what the backend says it
+// stored, and refresh the reset buttons. Returns the stored settings (or null).
+async function saveSettings(patch) {
+  Object.assign(curSettings, patch)
+  let next = null
+  try {
+    next = await invoke('set_settings', { next: patch })
+    if (next && typeof next === 'object') Object.assign(curSettings, next)
+  } catch (err) {
+    console.warn('[vox] set_settings failed:', err)
+  }
+  refreshResets()
+  return next
+}
+
+// Accessibility / Fn-key warnings at the top of the Dictée group. Re-checked
+// each time the panel opens, when the key changes and when the window regains
+// focus (the user just came back from System Settings).
+async function refreshDictStatus() {
+  const accEl = document.getElementById('warn-acc')
+  const fnEl = document.getElementById('warn-fn')
+  let accOk = true, fnOk = true
+  try { accOk = (await invoke('accessibility_status')) !== false }
+  catch (err) { console.warn('[vox] accessibility_status failed:', err) }
+  if ((curSettings.dictation_key || 'fn') === 'fn') {
+    try {
+      const st = await invoke('fn_key_status')
+      fnOk = !(st && st.globe_does_nothing === false)
+    } catch (err) { console.warn('[vox] fn_key_status failed:', err) }
+  }
+  accEl.style.display = accOk ? 'none' : ''
+  fnEl.style.display = fnOk ? 'none' : ''
+}
+window.addEventListener('focus', () => { if (settingsOpen) refreshDictStatus() })
+document.getElementById('warn-acc-btn').addEventListener('click', async () => {
+  try { await invoke('request_accessibility') } catch (err) { console.warn('[vox] request_accessibility failed:', err) }
+  refreshDictStatus()
+})
+document.getElementById('warn-fn-btn').addEventListener('click', () => {
+  invoke('open_url', { url: 'x-apple.systempreferences:com.apple.Keyboard-Settings.extension' })
+    .catch((err) => console.warn('[vox] open_url failed:', err))
+})
+
+// Push `curSettings` into every control (also used after a reset).
+async function fillControls() {
+  const s = curSettings
+  uiLang = s.language || 'fr'
+  dictKey = s.dictation_key || 'fn'
+  dictKeySelect.value = s.dictation_key || 'fn'
+  dictFormatSelect.value = s.dictation_format || 'llm'
+  sttSelect.value = s.stt_model || 'whisper-small'
+  applyUiLang()
+  renderProviderOptions(s.provider || 'ollama')
+  await reloadModels(s.provider || 'ollama', s.model)
+  for (const btn of langSegment.querySelectorAll('button')) {
+    btn.classList.toggle('on', btn.dataset.lang === uiLang)
+  }
+  for (const btn of agentReplySegment.querySelectorAll('button')) {
+    btn.classList.toggle('on', btn.dataset.reply === (s.agent_reply || 'summary'))
+  }
+  // The launch-mode row only appears when both modes actually exist. On a
+  // Conductor-only machine "in Orca" would silently fall back to headless, and
+  // offering a switch that does nothing is worse than not offering it.
+  document.getElementById('row-agent-launch').style.display =
+    adeInfo.can_launch_natively ? '' : 'none'
+  const launchMode = adeInfo.can_launch_natively ? (s.agent_launch || 'native') : 'headless'
+  for (const btn of agentLaunchSegment.querySelectorAll('button')) {
+    btn.classList.toggle('on', btn.dataset.launch === launchMode)
+  }
+  if (engineRowVisible) engineSelect.value = s.tts_engine || 'auto'
+  refreshResets()
+}
+
 async function openSettings() {
   if (settingsOpen) return
   // Settings takes the panel space — retire the carousel and setup instantly.
@@ -1708,38 +2202,35 @@ async function openSettings() {
   settingsOpen = true
   bodyClasses()
   syncWindow()
+  document.getElementById('settings-body').scrollTop = 0
 
-  const current = await invoke('get_settings')
-  uiLang = current.language || 'fr'
+  curSettings = await invoke('get_settings')
+  uiLang = curSettings.language || 'fr'
   applyUiLang()
 
   try {
     document.getElementById('app-version').textContent = 'v' + (await invoke('get_version'))
   } catch {}
 
+  invoke('settings_defaults').then((d) => { defaultSettings = d || {}; refreshResets() })
+    .catch((err) => console.warn('[vox] settings_defaults failed:', err))
+  invoke('stt_models').then((m) => { sttModels = Array.isArray(m) ? m : []; renderSttOptions() })
+    .catch((err) => console.warn('[vox] stt_models failed:', err))
+
   // Provider first: it decides which model list is even meaningful.
   providerStatus = await invoke('provider_status').catch(() => ({}))
-  renderProviderOptions(current.provider || 'ollama')
-  await reloadModels(current.provider || 'ollama', current.model)
+  adeInfo = await invoke('ade_info').catch(() => adeInfo)
 
-  for (const btn of langSegment.querySelectorAll('button')) {
-    btn.classList.toggle('on', btn.dataset.lang === current.language)
-  }
-  for (const btn of agentReplySegment.querySelectorAll('button')) {
-    btn.classList.toggle('on', btn.dataset.reply === (current.agent_reply || 'summary'))
-  }
-
-  // Only offer the picker once there is something to pick: until Qwen is
-  // installed the choice is between two engines the user can't hear apart
-  // (one per language), so the row would be noise.
+  // Only offer the voice-engine picker once there is something to pick: until
+  // Qwen is installed the choice is between two engines the user can't hear
+  // apart (one per language), so the row would be noise.
   const probe = lastProbe || await invoke('probe_setup').catch(() => null)
   engineRowVisible = !!(probe && probe.qwenReady)
   engineRow.style.display = engineRowVisible ? '' : 'none'
-  if (engineRowVisible) {
-    renderEngineOptions()
-    engineSelect.value = current.tts_engine || 'auto'
-  }
-  syncWindow()
+
+  await fillControls()
+  refreshDictStatus()
+  loadVocabulary()
 }
 
 function closeSettings() {
@@ -1789,10 +2280,11 @@ document.getElementById('recap-btn').addEventListener('click', () => {
 })
 
 providerSelect.addEventListener('change', async () => {
-  const next = await invoke('set_settings', { next: { provider: providerSelect.value } })
+  const next = await saveSettings({ provider: providerSelect.value })
   // The backend resets `model` to that provider's default, because model ids
   // don't transfer — reload the list and show what it actually picked.
-  await reloadModels(next.provider, next.model)
+  const st = next || curSettings
+  await reloadModels(st.provider || providerSelect.value, st.model)
 })
 
 async function reloadModels(provider, model) {
@@ -1811,13 +2303,110 @@ async function reloadModels(provider, model) {
   modelSelect.value = model || (models[0] || '')
 }
 
+// Vocabulary: one word per line / `from => to` per line. A failing command only
+// logs — the panel stays usable.
+async function loadVocabulary() {
+  try {
+    const v = await invoke('get_vocabulary')
+    vocabWordsEl.value = (v.words || []).join('\n')
+    vocabReplEl.value = (v.replacements || []).map(r => r.from + ' => ' + r.to).join('\n')
+    refreshVocabReset()
+  } catch (err) {
+    console.warn('[vox] get_vocabulary failed:', err)
+  }
+}
+
+function saveVocabulary() {
+  const words = vocabWordsEl.value.split('\n').map(l => l.trim()).filter(Boolean)
+  const replacements = []
+  for (const line of vocabReplEl.value.split('\n')) {
+    const i = line.indexOf('=>')
+    if (i < 0) continue
+    const from = line.slice(0, i).trim(), to = line.slice(i + 2).trim()
+    if (from) replacements.push({ from, to })
+  }
+  invoke('set_vocabulary', { vocab: { words, replacements } })
+    .catch((err) => console.warn('[vox] set_vocabulary failed:', err))
+}
+document.getElementById('vocab-head').addEventListener('click', (e) => {
+  if (e.target.closest('.reset-btn')) return
+  const row = document.getElementById('row-vocab')
+  const open = row.classList.toggle('open')
+  document.getElementById('vocab-cols').style.display = open ? '' : 'none'
+})
+document.getElementById('vocab-reset').addEventListener('click', () => {
+  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+  if (!confirm(L.vocabResetConfirm)) return
+  vocabWordsEl.value = ''; vocabReplEl.value = ''
+  saveVocabulary()
+  refreshVocabReset()
+})
+function refreshVocabReset() {
+  const has = vocabWordsEl.value.trim() || vocabReplEl.value.trim()
+  document.getElementById('vocab-reset').classList.toggle('show', !!has)
+}
+vocabWordsEl.addEventListener('input', refreshVocabReset)
+vocabReplEl.addEventListener('input', refreshVocabReset)
+vocabWordsEl.addEventListener('change', saveVocabulary)
+vocabReplEl.addEventListener('change', saveVocabulary)
+vocabWordsEl.addEventListener('blur', saveVocabulary)
+vocabReplEl.addEventListener('blur', saveVocabulary)
+
+dictFormatSelect.addEventListener('change', () => {
+  saveSettings({ dictation_format: dictFormatSelect.value })
+})
+
 modelSelect.addEventListener('change', () => {
-  invoke('set_settings', { next: { model: modelSelect.value } })
+  saveSettings({ model: modelSelect.value })
+})
+
+dictKeySelect.addEventListener('change', async () => {
+  dictKey = dictKeySelect.value
+  await saveSettings({ dictation_key: dictKeySelect.value })
+  refreshDictStatus()
+})
+
+// Choosing a model that isn't installed installs it first (progress comes from
+// setup-log events tagged "stt"), and only then saves the setting. On failure
+// the select goes back to the previous model and the error is shown.
+function setSttProgress(text, cls) {
+  sttProgress.style.display = text ? '' : 'none'
+  sttProgress.className = 'setting-hint' + (cls ? ' ' + cls : '')
+  sttProgress.textContent = text || ''
+}
+sttSelect.addEventListener('change', async () => {
+  const id = sttSelect.value
+  const prev = curSettings.stt_model || 'whisper-small'
+  const m = sttModels.find(x => x.id === id)
+  if (!m || m.installed) {
+    setSttProgress('')
+    saveSettings({ stt_model: id })
+    return
+  }
+  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+  sttInstalling = id
+  sttSelect.disabled = true
+  setSttProgress(L.installing, 'busy')
+  try {
+    await invoke('install_stt', { model: id })
+    m.installed = true
+    sttInstalling = null
+    setSttProgress('')
+    renderSttOptions()
+    sttSelect.value = id
+    await saveSettings({ stt_model: id })
+  } catch (err) {
+    console.warn('[vox] install_stt failed:', err)
+    sttInstalling = null
+    sttSelect.value = prev
+    setSttProgress(String((err && err.message) || err), 'err')
+  }
+  sttSelect.disabled = false
 })
 
 // Restarts the TTS daemon and speaks a fixed sample line — the A/B in one click.
 engineSelect.addEventListener('change', () => {
-  invoke('set_settings', { next: { tts_engine: engineSelect.value } })
+  saveSettings({ tts_engine: engineSelect.value })
 })
 
 // No daemon restart here, unlike the language toggle: the announcement path
@@ -1826,7 +2415,16 @@ agentReplySegment.addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-reply]')
   if (!btn) return
   for (const b of agentReplySegment.querySelectorAll('button')) b.classList.toggle('on', b === btn)
-  invoke('set_settings', { next: { agent_reply: btn.dataset.reply } })
+  saveSettings({ agent_reply: btn.dataset.reply })
+})
+
+// Read at launch time, so the next voice command already uses the new mode —
+// no daemon restart, same as the agent-reply toggle.
+agentLaunchSegment.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-launch]')
+  if (!btn) return
+  for (const b of agentLaunchSegment.querySelectorAll('button')) b.classList.toggle('on', b === btn)
+  saveSettings({ agent_launch: btn.dataset.launch })
 })
 
 langSegment.addEventListener('click', (e) => {
@@ -1835,7 +2433,36 @@ langSegment.addEventListener('click', (e) => {
   for (const b of langSegment.querySelectorAll('button')) b.classList.toggle('on', b === btn)
   uiLang = btn.dataset.lang
   applyUiLang()
-  invoke('set_settings', { next: { language: btn.dataset.lang } })
+  saveSettings({ language: btn.dataset.lang })
+})
+
+// Per-row reset: write the default(s) for the row's key(s), then redraw.
+for (const btn of document.querySelectorAll('.reset-btn[data-reset]')) {
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation()
+    const patch = {}
+    for (const k of btn.dataset.reset.split(',')) {
+      if (defaultSettings[k] !== undefined) patch[k] = defaultSettings[k]
+    }
+    if (!Object.keys(patch).length) return
+    const next = await saveSettings(patch)
+    if (!next) Object.assign(curSettings, patch)
+    await fillControls()
+    if (patch.dictation_key !== undefined) refreshDictStatus()
+  })
+}
+
+document.getElementById('reset-all').addEventListener('click', async () => {
+  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+  if (!confirm(L.resetAllConfirm)) return
+  if (Object.keys(defaultSettings).length) {
+    await saveSettings({ ...defaultSettings })
+    await fillControls()
+  }
+  vocabWordsEl.value = ''; vocabReplEl.value = ''
+  saveVocabulary()
+  refreshVocabReset()
+  refreshDictStatus()
 })
 
 // ── Events from Rust ─────────────────────────────────────────────────────────
@@ -1879,6 +2506,9 @@ listen('setup-needed', (e) => {
 
 listen('setup-log', (e) => {
   appendLog(e.payload.tag || 'setup', e.payload.line || '')
+  if (sttInstalling && e.payload.tag === 'stt' && e.payload.line) {
+    setSttProgress(String(e.payload.line).trim().slice(0, 90), 'busy')
+  }
 })
 
 // Last-resort unbricking. The pill only leaves a speaking state on
@@ -1897,6 +2527,7 @@ setInterval(() => {
 }, 5000)
 
 listen('speaking-start', () => {
+  if (dictBusy()) return   // a superseded reply must not hijack the dictation UI
   lastSpeechSignal = Date.now()
   ttsStartedAt = Date.now()
   setState('speaking')
@@ -1928,6 +2559,10 @@ listen('speaking-done', () => {
 // both onerror AND play().catch; a duplicate ack must not consume the NEXT
 // sentence's wait on the Rust side).
 listen('play-wav', (e) => {
+  if (dictBusy()) {        // never play over a dictation; ack so the queue drains
+    invoke('audio_done', { id: e.payload.id })
+    return
+  }
   lastSpeechSignal = Date.now()
   const src = convertFileSrc(e.payload.path)
   const id = e.payload.id
@@ -1969,7 +2604,7 @@ listen('agent-status', (e) => {
   agentCount = e.payload.count
   agentLabels = (e.payload.agents || []).map((a) => a.label).filter(Boolean)
   if (state !== 'listening' && state !== 'thinking' && state !== 'speaking'
-      && state !== 'active' && state !== 'boot' && state !== 'announcing') {
+      && state !== 'active' && state !== 'boot' && state !== 'announcing' && !dictBusy()) {
     setState(agentCount > 0 ? 'running' : 'idle')
   } else {
     updateBadge()
@@ -2007,8 +2642,9 @@ document.getElementById('announce-badge').addEventListener('click', () => {
 })
 
 // The exact prompt sent to an agent. Vox says one short sentence out loud, so
-// this is the only place the full drafted prompt is ever visible — and Conductor
-// cannot show it either, since a headless agent writes nothing to its database.
+// this is the only place the full drafted prompt is ever visible in headless
+// mode, where the agent writes nothing the ADE could show. A native launch also
+// emits this, and there the prompt is visible in the agent's own terminal too.
 listen('delegation', (e) => {
   const p = e.payload || {}
   const prompt = (p.prompt || '').trim()
@@ -2019,6 +2655,7 @@ listen('delegation', (e) => {
 })
 
 listen('transcript', (e) => {
+  if (dictBusy()) return
   if (e.payload && e.payload.trim()) {
     voxIsShowing = false
     showTranscript(e.payload.trim())
@@ -2029,6 +2666,7 @@ listen('transcript', (e) => {
 // sentence sticks around after speaking-done (that's usually the advice).
 let voxIsShowing = false
 listen('speaking-text', (e) => {
+  if (dictBusy()) return
   const t = (e.payload.text || '').trim()
   if (!t) return
   voxIsShowing = true
@@ -2053,6 +2691,7 @@ listen('startup-brief-starting', () => {
   try {
     const s = await invoke('get_settings')
     uiLang = s.language || 'fr'
+    dictKey = s.dictation_key || 'fn'
   } catch {}
   applyUiLang()
   setState('idle')

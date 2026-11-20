@@ -84,7 +84,7 @@ CASES = [
     "du TypeScript", "du JavaScript", "NextJS et ReactJS",
     # Structure.
     "voir https://github.com/justeozan/vox pour le diff",
-    "le fichier /Users/spectre/conductor/repos/vox/README.md a changé",
+    "le fichier /Users/spectre/orca/repos/vox/README.md a changé",
     "corrige #42 puis #7",
     "**gras** et _italique_ et `code`",
     "# Titre\ndeuxième ligne",
