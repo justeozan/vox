@@ -55,11 +55,7 @@ Everything runs on your machine. No cloud calls, no API keys.
 
 1. Download the latest `.dmg` from [Releases](https://github.com/justeozan/vox/releases).
 2. Open it and drag **Vox** into Applications.
-3. First launch: macOS will refuse to open it because the build is ad-hoc signed, not notarized. **Right-click Vox.app → Open**, confirm once — you only need to do this the first time.
-   Or clear the quarantine flag from the terminal:
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/Vox.app
-   ```
+3. Releases after 0.5.0 are signed with a Developer ID and notarised by Apple, so macOS opens them directly. With 0.5.0 or older from this page, macOS refuses the ad hoc build the first time: **right-click Vox.app → Open** and confirm once.
 4. Launch Vox. On first run it **detects what's missing and auto-installs the local speech stack** (Whisper, Kokoro, Piper) into `~/.vox/venv` — a small panel shows the progress. No separate setup script. You just need Python 3.11+ and an internet connection for that first install (`scripts/install.sh` still exists as a manual fallback).
 5. Make sure Ollama has a model pulled:
    ```bash
@@ -156,7 +152,7 @@ npm run dev          # run locally (file watcher off — see .taurignore)
 npm run tauri build  # produce a release .app bundle
 ```
 
-The GitHub Actions release workflow (`.github/workflows/release.yml`) additionally builds a `.dmg` and attaches it to the release on every `v*` tag push.
+The GitHub Actions release workflow (`.github/workflows/release.yml`) additionally builds a `.dmg` and attaches it to the release on every `v*` tag push. It signs the app and the `.dmg` with the Developer ID certificate, notarises and staples both, so Gatekeeper opens them directly; when the R2 secrets are set it also publishes the `.dmg` to evey.run/download/vox. The secrets it needs are listed at the top of the workflow.
 
 ## Evaluating a new voice
 
