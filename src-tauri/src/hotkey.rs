@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 /// Marks events Vox posts itself (the ⌘V of a paste) so the tap ignores them.
-pub const SELF_TAG: i64 = 0x564F_5844_4943_54; // "VOXDICT"
+pub const SELF_TAG: i64 = 0x0056_4F58_4449_4354; // "VOXDICT"
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
