@@ -11,6 +11,7 @@ pub mod announce;
 pub mod brain;
 pub mod conductor;
 pub mod daemons;
+pub mod hermes;
 pub mod llm;
 pub mod logfile;
 pub mod orca;
@@ -68,6 +69,11 @@ pub struct Settings {
     /// Orca) | "conductor" (its SQLite DB; agents run headless).
     #[serde(default = "default_backend")]
     pub backend: String,
+    /// Speak Hermes Agent's replies (read from `~/.hermes/state.db`). Uses
+    /// `agent_reply` for summary vs verbatim. On by default; inert when Hermes
+    /// isn't installed.
+    #[serde(default = "default_true")]
+    pub hermes_voice: bool,
     /// Pill transparency, 0 (dark, most legible) ..= 100 (clearest glass).
     /// Drives the CSS tint and, on macOS 26+, the Liquid Glass style.
     #[serde(default = "default_glass_transparency")]
@@ -82,6 +88,10 @@ fn default_glass_transparency() -> u8 {
 }
 fn default_drop_after_secs() -> u64 {
     180
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_backend() -> String {
@@ -252,6 +262,10 @@ fn load_settings() -> Settings {
         .and_then(|v| v.as_u64())
         .map(|n| n.min(100) as u8)
         .unwrap_or_else(default_glass_transparency);
+    let hermes_voice = persisted
+        .get("hermes_voice")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let drop_after_secs = persisted
         .get("drop_after_secs")
         .and_then(|v| v.as_u64())
@@ -264,6 +278,7 @@ fn load_settings() -> Settings {
         tts_engine,
         provider,
         backend,
+        hermes_voice,
         glass_transparency,
         drop_after_secs,
     }
@@ -663,6 +678,11 @@ unsafe fn set_glass_style(transparency: u8) {
 }
 
 #[tauri::command]
+fn hermes_info() -> Value {
+    json!({ "installed": hermes::is_installed() })
+}
+
+#[tauri::command]
 fn glass_info() -> Value {
     json!({ "liquid_glass": LIQUID_GLASS.load(Ordering::SeqCst) })
 }
@@ -817,6 +837,10 @@ async fn set_settings(
                     settings.backend = b;
                 }
             }
+            // Read per tick by the Hermes watcher: no restart.
+            if let Some(h) = next.get("hermes_voice").and_then(|v| v.as_bool()) {
+                settings.hermes_voice = h;
+            }
             // Pure appearance / UI timing: no restart, applied right here.
             if let Some(t) = next.get("glass_transparency").and_then(|v| v.as_u64()) {
                 settings.glass_transparency = t.min(100) as u8;
@@ -870,6 +894,7 @@ async fn set_settings(
             "agent_reply": s.agent_reply,
             "agent_reply_max_chars": s.agent_reply_max_chars,
             "backend": s.backend,
+            "hermes_voice": s.hermes_voice,
             "glass_transparency": s.glass_transparency,
             "drop_after_secs": s.drop_after_secs,
             "restarted": restart,
@@ -1444,6 +1469,7 @@ pub fn run() {
             audio_route::restore_mic_route,
             audio_route::duck_other_audio,
             get_settings,
+            hermes_info,
             set_settings,
             list_models,
             provider_status,
@@ -1849,6 +1875,7 @@ pub fn run() {
                 // just holds until there is a voice to say them with.
                 announce::start_drainer(handle.clone(), st.clone());
                 watch::start(handle.clone(), st.clone());
+                hermes::start(handle.clone(), st.clone());
 
                 // Dev affordance: drive a full turn (LLM → tool → agent →
                 // announcement) without a microphone. The mic needs a signed

@@ -60,6 +60,8 @@ pub enum AnnounceKind {
     NeedsInput,
     VoxAgentDone,
     VoxAgentFailed,
+    /// Hermes (the assistant) answered — see `hermes.rs`.
+    HermesReply,
 }
 
 impl AnnounceKind {
@@ -70,6 +72,7 @@ impl AnnounceKind {
             AnnounceKind::NeedsInput => "needs_input",
             AnnounceKind::VoxAgentDone => "agent_done",
             AnnounceKind::VoxAgentFailed => "agent_failed",
+            AnnounceKind::HermesReply => "hermes_reply",
         }
     }
     /// A blocked agent outranks a finished one — it's waiting on the user.
@@ -565,15 +568,18 @@ fn render(
         && cleaned.chars().count() <= max_chars
         && speech_secs(&cleaned) <= max_chars as f32 / CHARS_PER_SECOND;
     if verbatim_ok {
-        // Prefix so it doesn't sound like Vox's own opinion.
-        send(
-            if en {
-                format!("{} replied.", a.project)
-            } else {
-                format!("{} a répondu.", a.project)
-            },
-            &a.project,
-        );
+        // Prefix so it doesn't sound like Vox's own opinion. A Hermes reply's
+        // headline already says exactly that.
+        if a.kind != AnnounceKind::HermesReply {
+            send(
+                if en {
+                    format!("{} replied.", a.project)
+                } else {
+                    format!("{} a répondu.", a.project)
+                },
+                &a.project,
+            );
+        }
         for s in speech::split_sentences(&cleaned) {
             send(s, &a.project);
         }
@@ -582,8 +588,9 @@ fn render(
 
     // Summarize, streamed: the first sentence plays while the rest generates.
     let model = state.settings.lock().unwrap().model.clone();
-    let sys = summary_system(en);
-    let user = summary_user(en, &a.project, a.original_ask.as_deref(), &cleaned);
+    let hermes = a.kind == AnnounceKind::HermesReply;
+    let sys = if hermes { hermes_summary_system(en) } else { summary_system(en) };
+    let user = summary_user(en, &a.project, a.original_ask.as_deref(), &cleaned, hermes);
     let interrupted = || state.interrupt_gen.load(Ordering::SeqCst) != gen0;
     let mut sent = 0usize;
     crate::llm::chat_once_stream(&model, &sys, &user, 90, &interrupted, |s| {
@@ -634,6 +641,8 @@ fn headline(a: &Announcement, en: bool) -> String {
         (AnnounceKind::Errored, true) => format!("Something errored on {p}."),
         (AnnounceKind::NeedsInput, false) => format!("{p} attend ta réponse."),
         (AnnounceKind::NeedsInput, true) => format!("{p} is waiting on you."),
+        (AnnounceKind::HermesReply, false) => format!("{p} a répondu."),
+        (AnnounceKind::HermesReply, true) => format!("{p} replied."),
     }
 }
 
@@ -699,14 +708,41 @@ fn summary_system(en: bool) -> String {
     }
 }
 
-fn summary_user(en: bool, project: &str, ask: Option<&str>, body: &str) -> String {
-    let ask = ask.unwrap_or("—");
-    // Head + tail: an agent's verdict is almost always at the end.
-    let body = head_tail(body, 4000, 2000);
+/// Same discipline as `summary_system` (describe, don't editorialise), but for
+/// a general assistant: what it ANSWERS, not what it CHANGED.
+fn hermes_summary_system(en: bool) -> String {
     if en {
-        format!("Project: {project}\nWhat was asked: \"{ask}\"\nAgent's final message:\n\"\"\"\n{body}\n\"\"\"\nOne sentence:")
+        "You are Vox. In ONE spoken sentence, say what an AI assistant just replied.\n\
+         - One sentence, 25 words maximum.\n\
+         - Report only what the message says. Invent nothing.\n\
+         - Speak about it in the third person (\"it says\", \"it suggests\").\n\
+         - No file paths, no code, no lists, no questions.\n\
+         - No preamble. Output the sentence and nothing else.\n\
+         Example message: \"The script is ready. Run it with python run.py and it will post twice a day.\"\n\
+         Example output: It says the script is ready and will post twice a day once you run it."
+            .into()
     } else {
-        format!("Projet : {project}\nCe qui était demandé : \"{ask}\"\nMessage final de l'agent :\n\"\"\"\n{body}\n\"\"\"\nUne phrase :")
+        "Tu es Vox. En UNE phrase orale, dis ce qu'un assistant IA vient de répondre.\n\
+         - Une phrase, 25 mots maximum.\n\
+         - Rapporte uniquement ce que le message dit. N'invente rien.\n\
+         - Parle de lui à la troisième personne (« il dit », « il propose »).\n\
+         - Aucun chemin de fichier, aucun code, aucune liste, aucune question.\n\
+         - Pas de préambule. Sors la phrase et rien d'autre.\n\
+         Exemple de message : « Le script est prêt. Lance-le avec python run.py et il postera deux fois par jour. »\n\
+         Exemple de sortie : Il dit que le script est prêt et postera deux fois par jour une fois lancé."
+            .into()
+    }
+}
+
+fn summary_user(en: bool, project: &str, ask: Option<&str>, body: &str, assistant: bool) -> String {
+    let ask = ask.unwrap_or("—");
+    // Head + tail: the verdict / next step is almost always at the end.
+    let body = head_tail(body, 4000, 2000);
+    match (en, assistant) {
+        (true, false) => format!("Project: {project}\nWhat was asked: \"{ask}\"\nAgent's final message:\n\"\"\"\n{body}\n\"\"\"\nOne sentence:"),
+        (false, false) => format!("Projet : {project}\nCe qui était demandé : \"{ask}\"\nMessage final de l'agent :\n\"\"\"\n{body}\n\"\"\"\nUne phrase :"),
+        (true, true) => format!("What the user said: \"{ask}\"\nThe assistant's reply:\n\"\"\"\n{body}\n\"\"\"\nOne sentence:"),
+        (false, true) => format!("Ce que l'utilisateur a dit : \"{ask}\"\nRéponse de l'assistant :\n\"\"\"\n{body}\n\"\"\"\nUne phrase :"),
     }
 }
 
@@ -805,6 +841,7 @@ mod tests {
             AnnounceKind::Errored,
             AnnounceKind::NeedsInput,
             AnnounceKind::Finished,
+            AnnounceKind::HermesReply,
         ] {
             for en in [true, false] {
                 for created in 0..3u64 {

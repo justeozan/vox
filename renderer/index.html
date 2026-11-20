@@ -909,6 +909,13 @@
         <button data-reply="verbatim">MOT POUR MOT</button>
       </div>
     </div>
+    <div class="setting-row" id="hermes-row" style="display:none">
+      <div class="setting-label" id="lbl-hermes">Hermes</div>
+      <div class="segment" id="hermes-segment">
+        <button data-hermes="on">ON</button>
+        <button data-hermes="off">OFF</button>
+      </div>
+    </div>
     <div class="setting-row">
       <div class="setting-label" id="lbl-backend">Backend</div>
       <div class="segment" id="backend-segment">
@@ -1067,6 +1074,7 @@ const LABEL_TABLE = {
     provOpenai: 'OpenAI (clé API)',
     agentReply: 'Réponse d\'agent', replySummary: 'RÉSUMÉ', replyVerbatim: 'MOT POUR MOT',
     glass: 'Transparence', drop: 'Goutte', dropNever: 'JAMAIS',
+    hermes: 'Hermes', hermesHint: 'Lit à voix haute les réponses de Hermes, en résumé ou mot pour mot selon « Réponse d\'agent ».',
     backend: 'Backend', backendHint: 'Orca : agents ouverts comme onglets. Conductor : agents en arrière-plan. Pris en compte tout de suite, sans redémarrage.',
     ttsEngine: 'Voix', engAuto: 'Automatique', engKokoro: 'Kokoro', engPiper: 'Piper',
     engQwen: 'Qwen3 (test)', engSay: 'macOS (say)',
@@ -1086,6 +1094,7 @@ const LABEL_TABLE = {
     provOpenai: 'OpenAI (API key)',
     agentReply: 'Agent reply', replySummary: 'SUMMARY', replyVerbatim: 'VERBATIM',
     glass: 'Transparency', drop: 'Drop', dropNever: 'NEVER',
+    hermes: 'Hermes', hermesHint: 'Reads Hermes\'s replies out loud, as a summary or verbatim depending on "Agent reply".',
     backend: 'Backend', backendHint: 'Orca: agents open as tabs. Conductor: agents run in the background. Applies immediately, no restart.',
     ttsEngine: 'Voice', engAuto: 'Automatic', engKokoro: 'Kokoro', engPiper: 'Piper',
     engQwen: 'Qwen3 (test)', engSay: 'macOS (say)',
@@ -2082,6 +2091,8 @@ const modelSelect = document.getElementById('model-select')
 const langSegment = document.getElementById('lang-segment')
 const agentReplySegment = document.getElementById('agent-reply-segment')
 const backendSegment = document.getElementById('backend-segment')
+const hermesRow = document.getElementById('hermes-row')
+const hermesSegment = document.getElementById('hermes-segment')
 const dropSegment = document.getElementById('drop-segment')
 const glassRange = document.getElementById('glass-range')
 const glassValue = document.getElementById('glass-value')
@@ -2166,6 +2177,8 @@ function applyUiLang() {
   document.getElementById('lbl-agent-reply').textContent = labels.agentReply
   document.getElementById('lbl-provider').textContent = labels.provider
   document.getElementById('lbl-backend').textContent = labels.backend
+  document.getElementById('lbl-hermes').textContent = labels.hermes
+  hermesSegment.title = labels.hermesHint
   backendSegment.title = labels.backendHint
   document.getElementById('lbl-glass').textContent = labels.glass
   document.getElementById('lbl-drop').textContent = labels.drop
@@ -2255,6 +2268,13 @@ async function openSettings() {
   }
   for (const btn of backendSegment.querySelectorAll('button')) {
     btn.classList.toggle('on', btn.dataset.backend === (current.backend || 'orca'))
+  }
+  // Only offered when Hermes is actually on this machine.
+  invoke('hermes_info').then((h) => {
+    hermesRow.style.display = h && h.installed ? '' : 'none'
+  }).catch(() => { hermesRow.style.display = 'none' })
+  for (const btn of hermesSegment.querySelectorAll('button')) {
+    btn.classList.toggle('on', (btn.dataset.hermes === 'on') === (current.hermes_voice !== false))
   }
 
   // Only offer the picker once there is something to pick: until Qwen is
@@ -2356,6 +2376,13 @@ agentReplySegment.addEventListener('click', (e) => {
   if (!btn) return
   for (const b of agentReplySegment.querySelectorAll('button')) b.classList.toggle('on', b === btn)
   invoke('set_settings', { next: { agent_reply: btn.dataset.reply } })
+})
+
+hermesSegment.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-hermes]')
+  if (!btn) return
+  for (const b of hermesSegment.querySelectorAll('button')) b.classList.toggle('on', b === btn)
+  invoke('set_settings', { next: { hermes_voice: btn.dataset.hermes === 'on' } })
 })
 
 // No restart: every workspace lookup re-reads it, so the next turn (and the

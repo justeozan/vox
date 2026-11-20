@@ -3,6 +3,13 @@
 ## Unreleased
 
 ### Added
+- **Hermes replies are read out loud.** Vox watches Hermes Agent's conversation
+  store (`~/.hermes/state.db`, read-only, or `$HERMES_HOME`) and speaks each new
+  final reply through the same queue as agent results — so it waits for silence,
+  ⌥Space parks it, and "il a dit quoi ?" works afterwards. It follows the
+  existing *Agent reply* setting (summary or verbatim). Subagent, cron, one-shot,
+  tool and API-server sessions are ignored; existing history is never read out
+  at launch. A *Hermes ON/OFF* row appears in settings when Hermes is installed.
 - **Waveform shows the real signal.** While you talk, the bars follow the
   microphone level; while Vox talks they follow the loudness of the clip being
   played (a 20 ms RMS envelope read at the audio's `currentTime`, so playback and
