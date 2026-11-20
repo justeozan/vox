@@ -24,7 +24,7 @@ The loop it closes:
 > **Hear back** — when an agent answers, Vox tells you out loud, summarized or word for word.
 > **Ask** — *"il a dit quoi ?"* — the result stays answerable for half an hour.
 
-On launch it reads Conductor's own database and speaks a recap: which agent is working, which is idle, which errored, and what to look at first. Everything runs on your machine by default — no cloud calls, no API keys.
+On launch it asks Orca what every worktree is doing and speaks a recap: which agent is working, which is blocked on you, which errored, and what to look at first. Everything runs on your machine by default — no cloud calls, no API keys.
 
 Everything runs on your machine. No cloud calls, no API keys.
 
@@ -40,8 +40,11 @@ Everything runs on your machine. No cloud calls, no API keys.
 - **Bilingual, fully switchable.** French and English each get their own STT language hint, system prompt, and TTS voice. Flipping the toggle in settings restarts the speech daemons and clears the conversation so the model doesn't carry over the wrong language.
 - **Native macOS pill.** Real-time desktop blur clipped to the pill's rounded corners (`window-vibrancy` + `NSVisualEffectView`), floats above fullscreen apps and every Space, animated waveform per state, and a per-letter transcript reveal so you can see what Vox heard.
 - **Barge-in.** Vox's own audio playback runs through the browser's echo-cancelled mic pipeline, so you can just start talking to cut it off mid-sentence — no separate "stop" gesture needed.
-- **Pronunciation dictionary.** Drop word → phonetic pairs in `~/.vox/pronunciations.json` (e.g. `{"Conductor": "conedeuctor"}`) to fix names the TTS engine mangles.
-- **Settings panel** (Cmd+,): choose the brain (provider + model, on one row — the model list follows the provider), toggle FR/EN, pick how agent answers are spoken, see the running version, and check GitHub for a newer release.
+- **Dictation anywhere.** Hold **Fn**, speak, release: the text is typed at your cursor in whatever app is in front — Slack, Mail, a code editor, a browser field. Double-tap Fn for hands-free (press again to finish), Esc cancels, and Fn used in a shortcut (Fn+←) is ignored. The key is your choice: Fn, right ⌥, right ⌘, right ⇧ or ⌥⇧Space. The mic is captured natively and stays warm for 20 s after a dictation, so the next one starts with 400 ms of audio from *before* the key press. Vox reads the text around your cursor (text markers included, so Chrome, Electron and web editors work, placeholders ignored), the brain cleans the transcript to fit in, with per-app style for mail, chat and notes; your replacements and correct spacing are applied last, and ⌘V is sent for your keyboard layout (Dvorak included), with your clipboard put back afterwards. Cleanup is optional (*Raw transcript*) and falls back to the raw text if the model is slow. Needs Accessibility (System Settings → Privacy & Security → Accessibility); for Fn, also set Keyboard → "Press 🌐 key to" → "Do Nothing" — the settings panel tells you when either is missing. Dictations are logged to `~/.vox/dictations.jsonl`. A port of [Amical](https://github.com/amicalhq/amical)'s pipeline (MIT).
+- **Choice of speech model.** Whisper small (default), Whisper large-v3 turbo (MLX), or Parakeet v3 (MLX — about 0.05 s per sentence on Apple Silicon, multilingual, but no vocabulary priming). Picked in settings, installed on demand into `~/.vox/venv`; used for both dictation and the assistant.
+- **Vocabulary.** Words Whisper keeps mangling, and `from => to` replacements, edited in settings (stored in `~/.vox/vocabulary.json`). Used by dictation.
+- **Pronunciation dictionary.** Drop word → phonetic pairs in `~/.vox/pronunciations.json` (e.g. `{"Orca": "orka"}`) to fix names the TTS engine mangles.
+- **Settings panel** (Cmd+,): choose the brain (provider + model, on one row — the model list follows the provider), toggle FR/EN, pick how agent answers are spoken, choose whether a voice-launched agent runs in Orca or headless, see the running version, and check GitHub for a newer release.
 
 ## Requirements
 
@@ -68,7 +71,8 @@ Everything runs on your machine. No cloud calls, no API keys.
 | Shortcut | Action |
 |---|---|
 | **Option+Space** | Start/stop listening. Also interrupts Vox while it's speaking or during the startup recap. |
-| **Cmd+,** | Open/close settings (model, language, version, updates). |
+| **Fn** (configurable) | Dictate into the app in front: hold to talk, release to type. Double-tap for hands-free, press again to finish; Esc cancels. |
+| **Cmd+,** | Open/close settings — grouped (Dictation, Voice, Brain, Agents); every setting has a ↺ to go back to its default. |
 
 Click the pill to open the project list, then the settings gear at its bottom-right; the shortcut works too.
 
@@ -111,7 +115,7 @@ All config lives under `~/.vox/`:
   ```
 - **`pronunciations.json`** — word → phonetic respelling, applied before text hits the TTS engine. Not created automatically; add it yourself.
   ```json
-  { "Conductor": "conedeuctor" }
+  { "Orca": "orka" }
   ```
   This doubles as a speech-recognition alias: if you taught the voice to *say* `orivo` as `oreevo`, Vox also accepts hearing "oreevo" and resolves it back.
 - **`aliases.json`** — optional, spoken form → real name, for repos whose names Whisper mangles. Not created automatically.
@@ -121,7 +125,7 @@ All config lives under `~/.vox/`:
 
 Advanced: environment variables override the persisted settings at launch, mainly useful for development — `VOX_MODEL`, `VOX_LANG`, `VOX_PROJECT`, `VOX_TTS`, `VOX_SAY_VOICE`, `VOX_AGENT_TIMEOUT` (Conductor agents only), `VOX_AGENT_REPLY`, `VOX_BACKEND`, plus:
 
-- `VOX_MAX_AGENTS` (default 4) — simultaneous agents. Each one is a full Claude Code process and they share a rate limit; past four a laptop also running Ollama and a speech model starts to crawl. Over the cap Vox refuses out loud rather than queueing silently.
+- `VOX_MAX_AGENTS` (default 4) — simultaneous agents. Each headless one is a full Claude Code process and they share a rate limit; past four a laptop also running Ollama and a speech model starts to crawl. Over the cap Vox refuses out loud rather than queueing silently.
 - `VOX_DRAFT_MODEL` — a second local model used only to expand a spoken request into a full agent prompt. It runs *after* the spoken confirmation, so a bigger model's latency is invisible. Defaults to the main model.
 - `VOX_DEBUG_SAY="…"` — drive one full turn at startup without a microphone. The mic needs a signed bundle, so this is the way to exercise the loop from `npm run tauri dev`.
 

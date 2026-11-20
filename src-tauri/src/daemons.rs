@@ -240,9 +240,11 @@ pub fn init_paths(state: &Arc<AppState>, app: &AppHandle) {
         None => eprintln!("[vox] whisper not found — STT CLI fallback unavailable"),
     }
 
-    // STT python: the ~/.vox/venv first — it is what first-run setup installs
-    // and keeps current. A system Python that happens to have whisper (often an
-    // old 3.9 user-site install) is only a fallback.
+    // STT python: ~/.vox/venv first — it is what setup installs into, and the
+    // only env that has the daemon's other deps (soundfile, mlx-whisper,
+    // parakeet-mlx). A system Python that merely has openai-whisper used to win
+    // here and then crash on import. The others remain as a fallback for a
+    // hand-made install.
     let mut stt_candidates: Vec<PathBuf> = vec![h.join(".vox/venv/bin/python")];
     if let Some(w) = &whisper_cli {
         if let Some(dir) = w.parent() {
@@ -300,15 +302,15 @@ pub fn start_stt(state: &Arc<AppState>) {
             }
         }
     };
-    let lang = {
+    let (lang, model) = {
         let s = state.settings.lock().unwrap();
-        lang_config(&s.language).stt.to_string()
+        (lang_config(&s.language).stt.to_string(), s.stt_model.clone())
     };
-    println!("[vox] starting STT daemon (lang: {lang})...");
+    println!("[vox] starting STT daemon (lang: {lang}, model: {model})...");
     match DaemonHandle::spawn(
         &python,
         &script,
-        vec![("VOX_STT_LANG".into(), lang)],
+        vec![("VOX_STT_LANG".into(), lang), ("VOX_STT_MODEL".into(), model)],
         "stt",
         None,
     ) {
@@ -450,6 +452,16 @@ fn start_tts_engine(state: &Arc<AppState>, app: AppHandle, engine: &'static str)
             }
         }
     }
+}
+
+/// Only speech-to-text — a model change mustn't cut the voice mid-sentence.
+pub fn restart_stt(state: &Arc<AppState>) {
+    if let Some(d) = state.stt.lock().unwrap().as_mut() {
+        d.kill();
+    }
+    *state.stt.lock().unwrap() = None;
+    let st = state.clone();
+    std::thread::spawn(move || start_stt(&st));
 }
 
 pub fn restart_daemons(state: &Arc<AppState>, app: AppHandle) {

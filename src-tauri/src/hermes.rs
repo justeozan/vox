@@ -108,7 +108,7 @@ fn replies_after(after: i64) -> Option<Vec<Reply>> {
                     ask: r
                         .get("ask")
                         .and_then(|v| v.as_str())
-                        .map(|a| crate::workspace::clean_snippet(a))
+                        .map(crate::workspace::clean_snippet)
                         .filter(|a| a.chars().count() > 3)
                         .map(|a| a.chars().take(150).collect()),
                 })

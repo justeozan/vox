@@ -9,8 +9,12 @@ pub mod agents;
 pub mod audio_route;
 pub mod announce;
 pub mod brain;
+pub mod capture;
 pub mod conductor;
 pub mod daemons;
+pub mod dictation;
+pub mod dictation_text;
+pub mod hotkey;
 pub mod hermes;
 pub mod llm;
 pub mod logfile;
@@ -65,6 +69,17 @@ pub struct Settings {
     /// (your subscription, via the CLI) | "anthropic" / "openai" (API key).
     #[serde(default = "default_provider")]
     pub provider: String,
+    /// Dictation (⌥⇧Space): "llm" cleans the transcript with the brain before
+    /// pasting it (Amical's formatter) | "raw" pastes Whisper's output as is.
+    #[serde(default = "default_dictation_format")]
+    pub dictation_format: String,
+    /// Speech-to-text engine for everything (assistant and dictation):
+    /// "whisper-small" | "whisper-large-v3-turbo" | "parakeet-v3".
+    #[serde(default = "default_stt_model")]
+    pub stt_model: String,
+    /// Dictation key — see hotkey::KEYS. Fn by default.
+    #[serde(default = "default_dictation_key")]
+    pub dictation_key: String,
     /// Where workspaces and agents live: "orca" (its CLI; agents open as tabs in
     /// Orca) | "conductor" (its SQLite DB; agents run headless).
     #[serde(default = "default_backend")]
@@ -114,6 +129,47 @@ pub fn persisted_backend() -> String {
         .map(|b| b.to_lowercase())
         .filter(|b| BACKENDS.contains(&b.as_str()))
         .unwrap_or_else(default_backend)
+}
+
+fn default_stt_model() -> String {
+    "whisper-small".into()
+}
+fn default_dictation_key() -> String {
+    "fn".into()
+}
+
+impl Default for Settings {
+    /// What every per-row reset in the settings panel goes back to.
+    fn default() -> Self {
+        let provider = default_provider();
+        Settings {
+            model: brain::default_model(&provider).to_string(),
+            language: "fr".into(),
+            agent_reply: default_agent_reply(),
+            agent_reply_max_chars: default_agent_reply_max(),
+            tts_engine: default_tts_engine(),
+            provider,
+            dictation_format: default_dictation_format(),
+            stt_model: default_stt_model(),
+            dictation_key: default_dictation_key(),
+            backend: default_backend(),
+            hermes_voice: true,
+            glass_transparency: default_glass_transparency(),
+            drop_after_secs: default_drop_after_secs(),
+        }
+    }
+}
+
+fn default_dictation_format() -> String {
+    "llm".into()
+}
+pub const DICTATION_FORMATS: &[&str] = &["llm", "raw"];
+
+pub fn now_ms_u64() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn default_provider() -> String {
@@ -257,6 +313,24 @@ fn load_settings() -> Settings {
         }
         d
     };
+    let dictation_format = persisted
+        .get("dictation_format")
+        .and_then(|v| v.as_str())
+        .filter(|f| DICTATION_FORMATS.contains(f))
+        .map(String::from)
+        .unwrap_or_else(default_dictation_format);
+    let stt_model = persisted
+        .get("stt_model")
+        .and_then(|v| v.as_str())
+        .filter(|m| setup::STT_MODELS.iter().any(|(id, _, _)| id == m))
+        .map(String::from)
+        .unwrap_or_else(default_stt_model);
+    let dictation_key = persisted
+        .get("dictation_key")
+        .and_then(|v| v.as_str())
+        .filter(|k| hotkey::KEYS.contains(k))
+        .map(String::from)
+        .unwrap_or_else(default_dictation_key);
     let glass_transparency = persisted
         .get("glass_transparency")
         .and_then(|v| v.as_u64())
@@ -277,6 +351,9 @@ fn load_settings() -> Settings {
         agent_reply_max_chars,
         tts_engine,
         provider,
+        dictation_format,
+        stt_model,
+        dictation_key,
         backend,
         hermes_voice,
         glass_transparency,
@@ -796,6 +873,8 @@ async fn set_settings(
     tauri::async_runtime::spawn_blocking(move || {
         let mut restart = false;
         let mut engine_changed = false;
+        let mut stt_changed = false;
+        let mut key_changed = false;
         {
             let mut settings = st.settings.lock().unwrap();
             if let Some(m) = next.get("model").and_then(|v| v.as_str()) {
@@ -828,6 +907,23 @@ async fn set_settings(
                 // than be a no-op.
                 if !brain::model_fits(&settings.provider, &settings.model) {
                     settings.model = brain::default_model(&settings.provider).to_string();
+                }
+            }
+            if let Some(f) = next.get("dictation_format").and_then(|v| v.as_str()) {
+                if DICTATION_FORMATS.contains(&f) {
+                    settings.dictation_format = f.to_string();
+                }
+            }
+            if let Some(m) = next.get("stt_model").and_then(|v| v.as_str()) {
+                if m != settings.stt_model && setup::STT_MODELS.iter().any(|(id, _, _)| *id == m) {
+                    settings.stt_model = m.to_string();
+                    stt_changed = true;
+                }
+            }
+            if let Some(k) = next.get("dictation_key").and_then(|v| v.as_str()) {
+                if k != settings.dictation_key && hotkey::KEYS.contains(&k) {
+                    settings.dictation_key = k.to_string();
+                    key_changed = true;
                 }
             }
             // No restart: every workspace lookup re-reads it.
@@ -867,6 +963,11 @@ async fn set_settings(
                 st.history.lock().unwrap().clear();
             }
             daemons::restart_daemons(&st, app.clone());
+        } else if stt_changed {
+            daemons::restart_stt(&st);
+        }
+        if key_changed {
+            apply_dictation_key(&app, &st.settings.lock().unwrap().dictation_key);
         }
         // The whole point of an A/B is hearing the new voice NOW.
         // `startup_brief_done` stays true, so nothing else would speak until
@@ -886,19 +987,9 @@ async fn set_settings(
             });
         }
         let s = st.settings.lock().unwrap().clone();
-        Ok(json!({
-            "provider": s.provider,
-            "tts_engine": s.tts_engine,
-            "model": s.model,
-            "language": s.language,
-            "agent_reply": s.agent_reply,
-            "agent_reply_max_chars": s.agent_reply_max_chars,
-            "backend": s.backend,
-            "hermes_voice": s.hermes_voice,
-            "glass_transparency": s.glass_transparency,
-            "drop_after_secs": s.drop_after_secs,
-            "restarted": restart,
-        }))
+        let mut out = serde_json::to_value(&s).unwrap_or_else(|_| json!({}));
+        out["restarted"] = json!(restart || stt_changed);
+        Ok(out)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -960,6 +1051,78 @@ async fn voice_input(
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// The ⌥⇧Space combination goes through the global-shortcut plugin; every
+/// other dictation key through the event tap (hotkey.rs).
+fn alt_shift_space() -> Shortcut {
+    Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::Space)
+}
+
+fn apply_dictation_key(app: &AppHandle, key: &str) {
+    let k = hotkey::Key::parse(key);
+    hotkey::set_key(k);
+    let gs = app.global_shortcut();
+    let combo = alt_shift_space();
+    let r = if k == hotkey::Key::AltShiftSpace {
+        if gs.is_registered(combo) { Ok(()) } else { gs.register(combo) }
+    } else if gs.is_registered(combo) {
+        gs.unregister(combo)
+    } else {
+        Ok(())
+    };
+    if let Err(e) = r {
+        eprintln!("[vox] dictation key {key}: {e}");
+    }
+    println!("[vox] dictation key = {key}");
+}
+
+#[tauri::command]
+fn settings_defaults() -> Settings {
+    Settings::default()
+}
+
+#[tauri::command]
+fn stt_models() -> Vec<Value> {
+    setup::STT_MODELS
+        .iter()
+        .map(|(id, label, detail)| json!({ "id": id, "label": label, "detail": detail, "installed": setup::stt_installed(id) }))
+        .collect()
+}
+
+#[tauri::command]
+async fn install_stt(app: AppHandle, model: String) -> Result<Value, String> {
+    if !setup::STT_MODELS.iter().any(|(id, _, _)| *id == model) {
+        return Err(format!("unknown model \"{model}\""));
+    }
+    tauri::async_runtime::spawn_blocking(move || setup::install_stt(&app, &model))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn accessibility_status() -> bool {
+    dictation::accessibility_trusted(false)
+}
+
+#[tauri::command]
+fn request_accessibility() -> bool {
+    dictation::accessibility_trusted(true)
+}
+
+#[tauri::command]
+fn fn_key_status() -> Value {
+    json!({ "globe_does_nothing": hotkey::globe_does_nothing() })
+}
+
+#[tauri::command]
+fn get_vocabulary() -> dictation::Vocabulary {
+    dictation::load_vocabulary()
+}
+
+#[tauri::command]
+fn set_vocabulary(vocab: dictation::Vocabulary) -> Result<(), String> {
+    dictation::save_vocabulary(vocab)
 }
 
 #[tauri::command]
@@ -1241,7 +1404,7 @@ fn pronunciations_path() -> PathBuf {
 }
 
 /// Word → phonetic respelling, applied to TTS input so the voice says tricky
-/// names the way you want (e.g. {"Conductor": "conedeuctor"}). Edited via
+/// names the way you want (e.g. {"Orca": "orka"}). Edited via
 /// ~/.vox/pronunciations.json. Voice-cloning is out of scope for Kokoro.
 pub fn load_pronunciations() -> Vec<(String, String)> {
     std::fs::read_to_string(pronunciations_path())
@@ -1440,12 +1603,19 @@ pub fn run() {
     });
 
     let alt_space = Shortcut::new(Some(Modifiers::ALT), Code::Space);
+    let dictate = alt_shift_space();
     let exit_state = state.clone();
 
     tauri::Builder::default()
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, shortcut, event| {
+                    // Dictation is push-to-talk: it needs the release too.
+                    if shortcut == &dictate {
+                        let _ = app;
+                        dictation::on_key(event.state() == ShortcutState::Pressed);
+                        return;
+                    }
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
@@ -1471,11 +1641,20 @@ pub fn run() {
             get_settings,
             hermes_info,
             set_settings,
+            
             list_models,
             provider_status,
             probe_setup,
             run_setup,
             voice_input,
+            settings_defaults,
+            stt_models,
+            install_stt,
+            accessibility_status,
+            request_accessibility,
+            fn_key_status,
+            get_vocabulary,
+            set_vocabulary,
             audio_done,
             set_pill_frame,
             glass_info,
@@ -1777,6 +1956,10 @@ pub fn run() {
             if let Err(e) = app.global_shortcut().register(alt_space) {
                 eprintln!("[vox] failed to register Alt+Space: {e}");
             }
+            // Dictation: Fn & co. through the event tap, ⌥⇧Space through the plugin.
+            dictation::init(app.handle().clone(), state.clone());
+            apply_dictation_key(app.handle(), &state.settings.lock().unwrap().dictation_key);
+            hotkey::start();
 
             #[cfg(debug_assertions)]
             if std::env::var("VOX_DEVTOOLS").is_ok() {

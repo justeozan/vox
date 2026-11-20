@@ -16,15 +16,15 @@ graph TD
 
     subgraph BG["BACKGROUND THREAD — lourd"]
         J --> K["ensure_registry\n~/.vox/projects.json"]
-        K --> L["init_paths\nfind: whisper, python3, claude CLI"]
+        K --> L["init_paths\nfind: whisper, python3, claude + orca CLI"]
         L --> M["start_stt\npython + vox_stt.py"]
         L --> N["start_tts\npython + vox_tts.py"]
         N -->|daemon ready| O["speak_startup_brief"]
     end
 
     subgraph BRIEF["STARTUP BRIEF"]
-        O --> P["read_state 10\nsqlite3 conductor.db"]
-        P --> Q["workspace_sentence\nworking / error / idle"]
+        O --> P["ade::read_state 10\norca worktree ps --json"]
+        P --> Q["build_brief_sentences\nworking / done / blocked / error"]
         Q --> R["chat_once Ollama\nrecommandation 1 phrase"]
         R --> S["speech::speak\nKokoro TTS"]
         S --> T["emit play-wav\nrenderer joue le WAV"]

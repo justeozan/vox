@@ -56,7 +56,7 @@
       "signingIdentity": "-"
     },
     "category": "DeveloperTool",
-    "shortDescription": "Talk to your Conductor worktrees instead of alt-tabbing between them.",
+    "shortDescription": "Talk to your Orca worktrees instead of alt-tabbing between them.",
     "publisher": "justeozan",
     "copyright": "MIT \u2014 https://github.com/justeozan/vox"
   }

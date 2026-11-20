@@ -3,6 +3,33 @@
 ## Unreleased
 
 ### Added
+- **Dictation (⌥⇧Space), ported from Amical.** Hold to talk, release, and the
+  cleaned-up text is pasted at the cursor of the frontmost app; a tap latches
+  hands-free, Esc cancels. At key press Vox reads the frontmost app and up to
+  500 characters either side of the cursor through the Accessibility API (with
+  `AXManualAccessibility` so Chromium/Electron apps expose a tree). Whisper gets
+  the vocabulary plus the tail of the previous dictation as its initial prompt.
+  The brain formats with Amical's prompt — a formatter, never a rewriter, with
+  email/chat/notes rules picked from the bundle ID or URL — plus French filler
+  rules; it gives up after 12 s or on a suspiciously long answer and the raw
+  transcript is used. Then replacements, Amical's boundary-spacing pass, and
+  clipboard + ⌘V with every pasteboard type restored after 700 ms (unless you
+  copied something since). Start/stop sound cues. `dictation_format`
+  (`llm`/`raw`), `~/.vox/vocabulary.json`, `~/.vox/dictations.jsonl`.
+- **Dictation v2.** Fn by default (CGEventTap — no global-shortcut API sees
+  a lone modifier, let alone Fn), or right ⌥/⌘/⇧ or ⌥⇧Space. Hold = push-to-talk,
+  double tap = hands-free, a single tap does nothing, Fn+another key is treated
+  as a shortcut and dropped silently; Esc is swallowed only while recording.
+  Native capture (cpal) replaces the webview mic: started on key-down, kept warm
+  for 20 s with a 400 ms pre-roll ring. Selection context via WebKit/Chromium
+  text markers, the web area and text descendants, with Amical's placeholder
+  checks. ⌘V keycode resolved through UCKeyTranslate for the active layout, and
+  Vox's own events are tagged so the tap ignores them.
+- **Speech model picker:** `stt_model` = `whisper-small` | `whisper-large-v3-turbo`
+  (mlx-whisper) | `parakeet-v3` (parakeet-mlx), installed on demand; the daemon
+  loads audio with soundfile (no ffmpeg) and warms the model before `ready`.
+- **Settings panel regrouped** (Dictée / Voix / Cerveau / Agents) with a reset
+  per row and "reset all"; `settings_defaults` backs it.
 - **Hermes replies are read out loud.** Vox watches Hermes Agent's conversation
   store (`~/.hermes/state.db`, read-only, or `$HERMES_HOME`) and speaks each new
   final reply through the same queue as agent results — so it waits for silence,
@@ -44,6 +71,9 @@
   same curve and duration (no more per-frame window resizing).
 
 ### Fixed
+- The STT daemon could start under a system Python that merely had
+  openai-whisper (it was tried before `~/.vox/venv`), then crash on the
+  daemon's other imports and fall back to the slow CLI. The venv now comes first.
 - The agent badge sat ~24 px short of the right edge: the two hidden (0-width)
   gear buttons still contributed flex gap.
 - "agents active" label duplicated the count shown in the badge.
