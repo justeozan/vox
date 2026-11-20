@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- WKWebView's getUserMedia needs this to create the microphone sandbox
+       extension. Without it macOS logs "Could not create a
+       'com.apple.webkit.microphone' sandbox extension" and the mic stream is
+       silent — Vox's VAD then never hears anything. -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+  <!-- WKWebView JIT under a hardened runtime (used by notarized `tauri build`).
+       No-ops on the ad-hoc dev signature but harmless. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+</dict>
+</plist>

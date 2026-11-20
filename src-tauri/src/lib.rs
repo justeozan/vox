@@ -6,25 +6,44 @@
 //! the source of the "grey frame" overflow bug.
 
 pub mod agents;
+pub mod audio_route;
+pub mod announce;
+pub mod brain;
+pub mod capture;
 pub mod conductor;
 pub mod daemons;
+pub mod dictation;
+pub mod dictation_text;
+pub mod hotkey;
+pub mod hermes;
 pub mod llm;
+pub mod logfile;
+pub mod orca;
 pub mod setup;
 pub mod speech;
+pub mod targets;
+pub mod watch;
+pub mod workspace;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::collections::VecDeque;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindow, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-pub const BAR_W: f64 = 480.0;
+pub const BAR_W: f64 = 408.0;
 pub const BAR_H: f64 = 56.0;
 const PILL_RADIUS: f64 = 28.0;
+/// NSPopUpMenuWindowLevel. See the setLevel call in `setup` for why not 25.
+#[cfg(target_os = "macos")]
+const PILL_WINDOW_LEVEL: isize = 101;
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 
@@ -32,7 +51,177 @@ const PILL_RADIUS: f64 = 28.0;
 pub struct Settings {
     pub model: String,
     pub language: String,
+    /// How a finished agent's answer is spoken:
+    /// "summary" (LLM-condensed, default) | "verbatim" (its own words) | "off".
+    /// "off" is intentionally not in the UI — set it in settings.json or via
+    /// VOX_AGENT_REPLY. Results are still remembered and still answerable.
+    #[serde(default = "default_agent_reply")]
+    pub agent_reply: String,
+    /// Verbatim above this many (cleaned) characters falls back to a summary.
+    /// ~14 chars/second of speech, so 420 is about half a minute.
+    #[serde(default = "default_agent_reply_max")]
+    pub agent_reply_max_chars: usize,
+    /// "auto" (language-derived, the historical behaviour) | "kokoro" |
+    /// "piper" | "qwen3" | "say".
+    #[serde(default = "default_tts_engine")]
+    pub tts_engine: String,
+    /// Which LLM answers: "ollama" (local) | "claude-cli" / "codex-cli"
+    /// (your subscription, via the CLI) | "anthropic" / "openai" (API key).
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    /// Dictation (⌥⇧Space): "llm" cleans the transcript with the brain before
+    /// pasting it (Amical's formatter) | "raw" pastes Whisper's output as is.
+    #[serde(default = "default_dictation_format")]
+    pub dictation_format: String,
+    /// Speech-to-text engine for everything (assistant and dictation):
+    /// "whisper-small" | "whisper-large-v3-turbo" | "parakeet-v3".
+    #[serde(default = "default_stt_model")]
+    pub stt_model: String,
+    /// Dictation key — see hotkey::KEYS. Fn by default.
+    #[serde(default = "default_dictation_key")]
+    pub dictation_key: String,
+    /// Where workspaces and agents live: "orca" (its CLI; agents open as tabs in
+    /// Orca) | "conductor" (its SQLite DB; agents run headless).
+    #[serde(default = "default_backend")]
+    pub backend: String,
+    /// Speak Hermes Agent's replies (read from `~/.hermes/state.db`). Uses
+    /// `agent_reply` for summary vs verbatim. On by default; inert when Hermes
+    /// isn't installed.
+    #[serde(default = "default_true")]
+    pub hermes_voice: bool,
+    /// Pill transparency, 0 (dark, most legible) ..= 100 (clearest glass).
+    /// Drives the CSS tint and, on macOS 26+, the Liquid Glass style.
+    #[serde(default = "default_glass_transparency")]
+    pub glass_transparency: u8,
+    /// Idle seconds before the pill folds into the water drop. 0 = never.
+    #[serde(default = "default_drop_after_secs")]
+    pub drop_after_secs: u64,
 }
+
+fn default_glass_transparency() -> u8 {
+    40
+}
+fn default_drop_after_secs() -> u64 {
+    180
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_backend() -> String {
+    "orca".into()
+}
+pub const BACKENDS: &[&str] = &["orca", "conductor"];
+
+/// The backend, read straight from disk — same reasoning as `persisted_provider`:
+/// workspace lookups run where no AppState is at hand, and re-reading makes a
+/// settings change apply on the next turn.
+pub fn persisted_backend() -> String {
+    std::env::var("VOX_BACKEND")
+        .ok()
+        .or_else(|| {
+            std::fs::read_to_string(settings_path())
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| v.get("backend").and_then(|p| p.as_str()).map(String::from))
+        })
+        .map(|b| b.to_lowercase())
+        .filter(|b| BACKENDS.contains(&b.as_str()))
+        .unwrap_or_else(default_backend)
+}
+
+fn default_stt_model() -> String {
+    "whisper-small".into()
+}
+fn default_dictation_key() -> String {
+    "fn".into()
+}
+
+impl Default for Settings {
+    /// What every per-row reset in the settings panel goes back to.
+    fn default() -> Self {
+        let provider = default_provider();
+        Settings {
+            model: brain::default_model(&provider).to_string(),
+            language: "fr".into(),
+            agent_reply: default_agent_reply(),
+            agent_reply_max_chars: default_agent_reply_max(),
+            tts_engine: default_tts_engine(),
+            provider,
+            dictation_format: default_dictation_format(),
+            stt_model: default_stt_model(),
+            dictation_key: default_dictation_key(),
+            backend: default_backend(),
+            hermes_voice: true,
+            glass_transparency: default_glass_transparency(),
+            drop_after_secs: default_drop_after_secs(),
+        }
+    }
+}
+
+fn default_dictation_format() -> String {
+    "llm".into()
+}
+pub const DICTATION_FORMATS: &[&str] = &["llm", "raw"];
+
+pub fn now_ms_u64() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn default_provider() -> String {
+    "ollama".into()
+}
+
+/// The provider, read straight from disk.
+///
+/// `chat_once` and friends are called from places that hold a model id but no
+/// AppState (the recap, announcement summaries). Reading the small settings
+/// file is cheaper than threading state through every one of them.
+pub fn persisted_provider() -> String {
+    std::env::var("VOX_PROVIDER")
+        .ok()
+        .or_else(|| {
+            std::fs::read_to_string(settings_path())
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| v.get("provider").and_then(|p| p.as_str()).map(String::from))
+        })
+        .filter(|p| brain::PROVIDERS.contains(&p.as_str()))
+        .unwrap_or_else(default_provider)
+}
+
+fn default_tts_engine() -> String {
+    "auto".into()
+}
+pub const TTS_ENGINES: &[&str] = &["auto", "kokoro", "piper", "qwen3", "say"];
+
+/// Collapse the user's setting into one concrete engine.
+///
+/// Returning `&'static str` keeps `start_tts`'s match exhaustive over literals
+/// and makes an unknown value impossible downstream — the old code silently
+/// fell through to Kokoro, which is exactly how a "qwen3" run could have
+/// produced Kokoro audio and invalidated a whole benchmark.
+pub fn resolve_engine(s: &Settings) -> &'static str {
+    match s.tts_engine.as_str() {
+        "kokoro" => "kokoro",
+        "piper" => "piper",
+        "qwen3" => "qwen3",
+        "say" => "say",
+        _ => lang_config(&s.language).tts_engine,
+    }
+}
+
+fn default_agent_reply() -> String {
+    "summary".into()
+}
+fn default_agent_reply_max() -> usize {
+    420
+}
+pub const AGENT_REPLY_MODES: &[&str] = &["summary", "verbatim", "off"];
 
 pub struct LangConfig {
     pub stt: &'static str,
@@ -72,16 +261,114 @@ fn load_settings() -> Settings {
         .or_else(|| persisted.get("language").and_then(|v| v.as_str()).map(String::from))
         .unwrap_or_else(|| "fr".into())
         .to_lowercase();
-    Settings { model, language }
+    let agent_reply = std::env::var("VOX_AGENT_REPLY")
+        .ok()
+        .or_else(|| persisted.get("agent_reply").and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_else(default_agent_reply)
+        .to_lowercase();
+    let agent_reply = if AGENT_REPLY_MODES.contains(&agent_reply.as_str()) {
+        agent_reply
+    } else {
+        default_agent_reply()
+    };
+    let agent_reply_max_chars = persisted
+        .get("agent_reply_max_chars")
+        .and_then(|v| v.as_u64())
+        .map(|n| (n as usize).clamp(120, 2000))
+        .unwrap_or_else(default_agent_reply_max);
+    // VOX_TTS stops being a per-session runtime bypass and becomes a
+    // launch-time SEED for the persisted setting: leaving it as a live
+    // override would let a stale shell export silently beat the settings
+    // picker, which is the exact class of bug the picker exists to remove.
+    let tts_engine = std::env::var("VOX_TTS")
+        .ok()
+        .or_else(|| persisted.get("tts_engine").and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_else(default_tts_engine)
+        .to_lowercase();
+    let tts_engine = if TTS_ENGINES.contains(&tts_engine.as_str()) {
+        tts_engine
+    } else {
+        default_tts_engine()
+    };
+    let provider = std::env::var("VOX_PROVIDER")
+        .ok()
+        .or_else(|| persisted.get("provider").and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_else(default_provider);
+    let provider = if brain::PROVIDERS.contains(&provider.as_str()) {
+        provider
+    } else {
+        default_provider()
+    };
+    let backend = persisted_backend();
+    // Keep the two in step at LOAD time, not just when the dropdown changes:
+    // VOX_PROVIDER (or a hand-edited settings.json) can set the provider
+    // without touching the model, leaving "Claude (subscription)" sitting next
+    // to "qwen3:8b" — a pairing that fails on every request.
+    let model = if brain::model_fits(&provider, &model) {
+        model
+    } else {
+        let d = brain::default_model(&provider).to_string();
+        if !model.trim().is_empty() {
+            println!("[vox] model {model:?} doesn't fit provider {provider:?} — using {d:?}");
+        }
+        d
+    };
+    let dictation_format = persisted
+        .get("dictation_format")
+        .and_then(|v| v.as_str())
+        .filter(|f| DICTATION_FORMATS.contains(f))
+        .map(String::from)
+        .unwrap_or_else(default_dictation_format);
+    let stt_model = persisted
+        .get("stt_model")
+        .and_then(|v| v.as_str())
+        .filter(|m| setup::STT_MODELS.iter().any(|(id, _, _)| id == m))
+        .map(String::from)
+        .unwrap_or_else(default_stt_model);
+    let dictation_key = persisted
+        .get("dictation_key")
+        .and_then(|v| v.as_str())
+        .filter(|k| hotkey::KEYS.contains(k))
+        .map(String::from)
+        .unwrap_or_else(default_dictation_key);
+    let glass_transparency = persisted
+        .get("glass_transparency")
+        .and_then(|v| v.as_u64())
+        .map(|n| n.min(100) as u8)
+        .unwrap_or_else(default_glass_transparency);
+    let hermes_voice = persisted
+        .get("hermes_voice")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let drop_after_secs = persisted
+        .get("drop_after_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(default_drop_after_secs);
+    Settings {
+        model,
+        language,
+        agent_reply,
+        agent_reply_max_chars,
+        tts_engine,
+        provider,
+        dictation_format,
+        stt_model,
+        dictation_key,
+        backend,
+        hermes_voice,
+        glass_transparency,
+        drop_after_secs,
+    }
 }
 
 fn save_settings(s: &Settings) {
     let p = settings_path();
     let _ = std::fs::create_dir_all(p.parent().unwrap());
-    let _ = std::fs::write(p, serde_json::to_string_pretty(&json!({
-        "model": s.model,
-        "language": s.language,
-    })).unwrap());
+    // Serialize the struct rather than hand-building the object: the old
+    // key-by-key version silently dropped any field someone forgot to add.
+    if let Ok(v) = serde_json::to_string_pretty(s) {
+        let _ = std::fs::write(p, v);
+    }
 }
 
 // ── Project registry ─────────────────────────────────────────────────────────
@@ -120,6 +407,11 @@ pub struct Paths {
     pub stt_script: Option<PathBuf>,
     pub tts_script: Option<PathBuf>,
     pub tts_piper_script: Option<PathBuf>,
+    pub tts_qwen_script: Option<PathBuf>,
+    /// The dedicated ~/.vox/venv-qwen interpreter. No system-python fallback:
+    /// a python without mlx_audio would just report a missing dependency at
+    /// every launch.
+    pub tts_qwen_python: Option<PathBuf>,
     pub stt_python: Option<PathBuf>,
     pub tts_python: Option<PathBuf>,
     pub whisper_cli: Option<PathBuf>,
@@ -138,7 +430,11 @@ pub struct AppState {
     pub audio_done: Mutex<Option<(u64, std::sync::mpsc::Sender<()>)>>,
     /// Monotonic id source for play-wav events.
     pub play_id: AtomicU64,
-    pub agent_count: AtomicI64,
+    /// Agents Vox has running, in launch order. Replaces the old bare counter:
+    /// an announcement has to name WHICH agent finished, and the concurrency
+    /// cap has to count slots reserved before a process even exists.
+    pub agents: Mutex<Vec<agents::AgentJob>>,
+    pub agent_seq: AtomicU64,
     pub active_project: Mutex<String>,
     pub startup_brief_done: AtomicBool,
     /// Interrupt GENERATION — bumped by the `interrupt` command (⌥Space /
@@ -146,59 +442,335 @@ pub struct AppState {
     /// mismatch as "cancelled". A counter (not a bool) so an old interrupt can
     /// never be un-armed by a later turn and resurrect a killed session.
     pub interrupt_gen: AtomicU64,
-    pub anim_gen: AtomicU64,
     pub paths: Mutex<Paths>,
     pub speak_lock: Mutex<()>,
+    /// Renderer pill state, mirrored from `setState` (see UI_* below). The
+    /// backend otherwise has NO way to know the mic is open — that lives
+    /// entirely in the webview — and speaking into an open mic feeds Vox's own
+    /// voice back to its VAD. Proactive speech only starts from a resting code.
+    pub ui_busy: AtomicU8,
+    /// Unix seconds of the last `ui_state` call. A webview that dies mid-turn
+    /// would otherwise pin `ui_busy` to a busy code forever.
+    pub ui_busy_at: AtomicU64,
+    /// Finished agent answers, newest last. Kept OUT of `history` on purpose —
+    /// history is replayed into every model call.
+    pub agent_results: Mutex<VecDeque<announce::AgentResult>>,
+    /// Announcements waiting to be spoken, plus the condvar the drainer parks
+    /// on. Durable: an interrupted batch comes back here.
+    pub announce_q: Arc<(Mutex<announce::Queue>, Condvar)>,
+    /// Unix seconds of the last spoken "I could do X next" offer.
+    pub last_proposal_at: AtomicU64,
+    /// (cwd, unix) for agents Vox launched recently. Guards against announcing
+    /// the same work twice should a Conductor bridge ever exist. (Conductor
+    /// backend only: an Orca agent lives in Orca, so the watcher is the one voice.)
+    pub vox_cwds: Mutex<Vec<(String, u64)>>,
+    /// Agents Vox started inside Orca (newest last), so "stop" can close their
+    /// tabs. Orca owns the process; this only remembers how to reach it.
+    pub orca_launches: Mutex<Vec<orca::LaunchRecord>>,
+    /// Agents working in Orca right now (any origin), refreshed by the watcher.
+    /// Only feeds the pill's badge.
+    pub orca_working: AtomicUsize,
 }
 
-// ── Window frame animation ───────────────────────────────────────────────────
-// Bottom-anchored, horizontally centered grow/shrink. Stepped resize with
-// ease-out cubic — runs off the main thread, each step dispatches to AppKit.
+// Renderer pill states, mirrored into `AppState::ui_busy`. Kept in sync with
+// UI_CODES in renderer/index.html.
+pub const UI_IDLE: u8 = 0;
+pub const UI_RUNNING: u8 = 5;
+/// After this long without a `ui_state` update, treat a busy code as stale.
+const UI_BUSY_STALE_SECS: u64 = 90;
 
-fn animate_frame(window: WebviewWindow, state: Arc<AppState>, gen: u64, tw: f64, th: f64) {
-    let scale = window.scale_factor().unwrap_or(2.0);
-    let (Ok(size), Ok(pos)) = (window.inner_size(), window.outer_position()) else { return };
-    let cw = size.width as f64 / scale;
-    let ch = size.height as f64 / scale;
-    let cx = pos.x as f64 / scale;
-    let cy = pos.y as f64 / scale;
-    if (cw - tw).abs() < 0.5 && (ch - th).abs() < 0.5 {
+/// True when the renderer is at rest — nothing is being said, heard, or thought
+/// about — so Vox may speak on its own initiative.
+pub fn ui_at_rest(state: &Arc<AppState>) -> bool {
+    let code = state.ui_busy.load(Ordering::SeqCst);
+    if code == UI_IDLE || code == UI_RUNNING {
+        return true;
+    }
+    // Fail open on a stale reading: a wedged webview must not mute Vox forever.
+    let at = state.ui_busy_at.load(Ordering::SeqCst);
+    now_unix().saturating_sub(at) > UI_BUSY_STALE_SECS
+}
+
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+// ── Microphone permission (macOS TCC) ────────────────────────────────────────
+// WKWebView's getUserMedia returns a "live" track but delivers SILENCE until the
+// host app holds a TCC microphone grant — wry auto-grants at the WebKit layer
+// yet never fires the OS prompt, so the mic sandbox extension can't be created
+// ("Could not create a 'com.apple.webkit.microphone' sandbox extension"). We
+// trigger the real prompt ourselves via AVFoundation; once the user allows it
+// (persisted against our stable app.vox.bar signature), the webview mic works.
+#[cfg(target_os = "macos")]
+fn request_microphone_access() {
+    use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSString;
+
+    unsafe {
+        // AVMediaTypeAudio is the string constant "soun".
+        let audio_type = NSString::from_str("soun");
+        let cls = class!(AVCaptureDevice);
+        // AVAuthorizationStatus: 0=notDetermined 1=restricted 2=denied 3=authorized
+        let status: isize = msg_send![cls, authorizationStatusForMediaType: &*audio_type];
+        println!("[vox] microphone TCC status = {status} (0=undetermined 1=restricted 2=denied 3=authorized)");
+        if status == 3 {
+            return;
+        }
+        if status == 2 {
+            eprintln!("[vox] microphone DENIED — enable it in System Settings > Privacy & Security > Microphone");
+            return;
+        }
+        // notDetermined -> fire the prompt. Heap block: the callback runs later,
+        // after this fn returns, so a stack block would be freed too early.
+        let handler: RcBlock<dyn Fn(Bool)> = RcBlock::new(|granted: Bool| {
+            println!("[vox] microphone access granted = {}", granted.as_bool());
+        });
+        let _: () = msg_send![cls, requestAccessForMediaType: &*audio_type, completionHandler: &*handler];
+    }
+}
+
+
+// ── Pill geometry: fixed envelope, native blur animated by Core Animation ────
+// The window is a FIXED transparent ENV_W x ENV_H envelope, never resized after
+// setup. Resizing a native window per frame is non-atomic (size and position
+// are separate calls) and the WKWebView relayouts a frame late — grey band,
+// bar jumping. Instead the page animates the pill's visible shape in CSS and
+// natively we animate ONLY the NSVisualEffectView (the blur) to the same rect
+// with the same curve + duration, composited by Core Animation. The pill is
+// always bottom-centered in the envelope.
+
+pub const ENV_W: f64 = 520.0;
+pub const ENV_H: f64 = 640.0;
+
+/// Rect in contentView coordinates (AppKit: origin bottom-left) — or, for the
+/// hit rect, offset by the window frame origin into screen coordinates.
+#[derive(Clone, Copy)]
+struct PillRect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+impl PillRect {
+    fn union(self, o: PillRect) -> PillRect {
+        let x0 = self.x.min(o.x);
+        let y0 = self.y.min(o.y);
+        let x1 = (self.x + self.w).max(o.x + o.w);
+        let y1 = (self.y + self.h).max(o.y + o.h);
+        PillRect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    }
+}
+
+fn pill_rect(width: f64, height: f64) -> PillRect {
+    PillRect { x: (ENV_W - width) / 2.0, y: 0.0, w: width, h: height }
+}
+
+/// The pill animation in flight: from → to over `dur`, on the shared curve.
+/// The poller uses the UNION of from+to as the hit rect until it ends, so the
+/// growing/shrinking pill never outruns its own click-through hit area, and
+/// interpolates the native corner radius from it every tick.
+#[derive(Clone, Copy)]
+struct PillAnim {
+    from: PillRect,
+    to: PillRect,
+    start: std::time::Instant,
+    dur: Duration,
+}
+
+impl PillAnim {
+    fn progress(&self, now: std::time::Instant) -> f64 {
+        if self.dur.is_zero() {
+            return 1.0;
+        }
+        let x = (now.saturating_duration_since(self.start).as_secs_f64() / self.dur.as_secs_f64())
+            .clamp(0.0, 1.0);
+        pill_ease(x)
+    }
+    fn height_at(&self, now: std::time::Instant) -> f64 {
+        let p = self.progress(now);
+        self.from.h + (self.to.h - self.from.h) * p
+    }
+    fn rect_at(&self, now: std::time::Instant) -> PillRect {
+        let p = self.progress(now);
+        let w = self.from.w + (self.to.w - self.from.w) * p;
+        pill_rect(w, self.height_at(now))
+    }
+    fn running(&self, now: std::time::Instant) -> bool {
+        now < self.start + self.dur
+    }
+}
+
+/// cubic-bezier(0.32, 0.72, 0, 1) — the same curve as the CSS --pill-ease and
+/// the CAMediaTimingFunction in set_pill_frame. Solves x(s) = t by bisection.
+fn pill_ease(t: f64) -> f64 {
+    const P1: (f64, f64) = (0.32, 0.72);
+    const P2: (f64, f64) = (0.0, 1.0);
+    let bez = |s: f64, a: f64, b: f64| {
+        let r = 1.0 - s;
+        3.0 * r * r * s * a + 3.0 * r * s * s * b + s * s * s
+    };
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.0;
+        if bez(mid, P1.0, P2.0) < t { lo = mid } else { hi = mid }
+    }
+    bez((lo + hi) / 2.0, P1.1, P2.1)
+}
+
+static PILL_STATE: Mutex<Option<PillAnim>> = Mutex::new(None);
+static PILL_BASE: PillRect = PillRect { x: (ENV_W - BAR_W) / 2.0, y: 0.0, w: BAR_W, h: BAR_H };
+
+/// The native view behind the pill: an NSGlassEffectView (Liquid Glass, macOS
+/// 26+) or, before that, window-vibrancy's NSVisualEffectViewTagged. Both take
+/// setCornerRadius:. Only ever dereferenced on the main thread.
+#[cfg(target_os = "macos")]
+static PILL_BG_VIEW: AtomicUsize = AtomicUsize::new(0);
+/// True when PILL_BG_VIEW is Liquid Glass.
+static LIQUID_GLASS: AtomicBool = AtomicBool::new(false);
+/// Last radius pushed to the native view (f64 bits), to skip no-op sets.
+#[cfg(target_os = "macos")]
+static PILL_RADIUS_NOW: AtomicU64 = AtomicU64::new(0);
+
+/// A capsule: half the height, capped at the pill's 28pt once panels make it
+/// tall. The water drop (48pt) is therefore a circle.
+fn radius_for(h: f64) -> f64 {
+    (h / 2.0).min(PILL_RADIUS)
+}
+
+fn current_hit_rect() -> PillRect {
+    let g = PILL_STATE.lock().unwrap();
+    match *g {
+        Some(a) => {
+            if a.running(std::time::Instant::now()) { a.from.union(a.to) } else { a.to }
+        }
+        None => PILL_BASE,
+    }
+}
+
+/// Main thread only. Keeps the native corner radius a true capsule at every
+/// frame. Not left to Core Animation: the glass view's cornerRadius isn't an
+/// animatable key, and a fixed radius on a shrinking pill reads as a squircle
+/// (or worse, overshoots on the 48pt drop).
+#[cfg(target_os = "macos")]
+unsafe fn sync_pill_radius() {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    let view = PILL_BG_VIEW.load(Ordering::SeqCst) as *mut AnyObject;
+    if view.is_null() {
         return;
     }
-    let tx = cx - (tw - cw) / 2.0;
-    let ty = cy - (th - ch); // tauri y grows downward; keep bottom edge fixed
-
-    // When growing, expand the size BEFORE recentering the origin — otherwise
-    // set_position moves the window left while it's still narrow, so the right
-    // edge briefly recedes and clips before the size step widens it again.
-    let growing = tw > cw || th > ch;
-
-    const STEPS: u32 = 20;
-    for i in 1..=STEPS {
-        if state.anim_gen.load(Ordering::SeqCst) != gen {
-            return; // superseded by a newer animation
-        }
-        let t = i as f64 / STEPS as f64;
-        let e = 1.0 - (1.0 - t).powi(3);
-        let pos = tauri::LogicalPosition::new(cx + (tx - cx) * e, cy + (ty - cy) * e);
-        let size = tauri::LogicalSize::new(cw + (tw - cw) * e, ch + (th - ch) * e);
-        if growing {
-            let _ = window.set_size(size);
-            let _ = window.set_position(pos);
-        } else {
-            let _ = window.set_position(pos);
-            let _ = window.set_size(size);
-        }
-        std::thread::sleep(Duration::from_millis(6));
+    let h = match *PILL_STATE.lock().unwrap() {
+        Some(a) => a.height_at(std::time::Instant::now()),
+        None => PILL_BASE.h,
+    };
+    let r = (radius_for(h) * 2.0).round() / 2.0;
+    if PILL_RADIUS_NOW.swap(r.to_bits(), Ordering::SeqCst) != r.to_bits() {
+        let _: () = msg_send![view, setCornerRadius: r];
     }
+}
+
+/// The class the pill window is converted to: an NSPanel subclass built at
+/// runtime that reports an active appearance even when it isn't key.
+///
+/// Liquid Glass draws differently by window state: a key window gets the full
+/// lensing/refraction, anything else gets a flat frosted blur. The pill is a
+/// non-activating panel, so it is NEVER key, and the moment another app is
+/// clicked the glass went milky. (The old NSVisualEffectView fallback never had
+/// this problem: window-vibrancy pins its `state` to Active.) Probed on macOS
+/// 26.7: of the window's appearance hooks only
+/// `_hasActiveAppearanceIgnoringKeyFocus` drives the glass, and answering YES
+/// restores the refraction while unfocused. Private selector, so the override
+/// is inert if a future OS stops asking for it. Falls back to plain NSPanel.
+#[cfg(target_os = "macos")]
+unsafe fn pill_panel_class() -> Option<*mut objc2::runtime::AnyClass> {
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
+    use std::sync::OnceLock;
+
+    unsafe extern "C-unwind" fn always_active(_this: *mut AnyObject, _cmd: Sel) -> Bool {
+        Bool::YES
+    }
+
+    static CLASS: OnceLock<usize> = OnceLock::new();
+    let addr = *CLASS.get_or_init(|| unsafe {
+        let Some(panel) = AnyClass::get(c"NSPanel") else { return 0 };
+        let sub = objc2::ffi::objc_allocateClassPair(panel, c"VoxPillPanel".as_ptr(), 0);
+        if sub.is_null() {
+            return panel as *const AnyClass as usize;
+        }
+        let imp: unsafe extern "C-unwind" fn(*mut AnyObject, Sel) -> Bool = always_active;
+        objc2::ffi::class_addMethod(
+            sub,
+            Sel::register(c"_hasActiveAppearanceIgnoringKeyFocus"),
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(*mut AnyObject, Sel) -> Bool,
+                Imp,
+            >(imp),
+            c"B@:".as_ptr(),
+        );
+        objc2::ffi::objc_registerClassPair(sub);
+        sub as usize
+    });
+    (addr != 0).then_some(addr as *mut AnyClass)
+}
+
+/// Liquid Glass style. Always "clear": the "regular" style lays its own dark
+/// frosted wash over the pill (with the dark appearance pinned), which read as
+/// a black veil snapping on below 50%. The slider is now purely the CSS tint,
+/// so it changes continuously with no jump. `transparency` kept for callers.
+fn apply_glass_style(app: &AppHandle, transparency: u8) {
+    #[cfg(target_os = "macos")]
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.run_on_main_thread(move || unsafe { set_glass_style(transparency) });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, transparency);
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn set_glass_style(transparency: u8) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyObject, Sel};
+    if !LIQUID_GLASS.load(Ordering::SeqCst) {
+        return;
+    }
+    let view = PILL_BG_VIEW.load(Ordering::SeqCst) as *mut AnyObject;
+    if view.is_null() {
+        return;
+    }
+    let sel = Sel::register(c"setStyle:");
+    let ok: bool = msg_send![view, respondsToSelector: sel];
+    if ok {
+        // NSGlassEffectViewStyleRegular = 0, NSGlassEffectViewStyleClear = 1
+        let _ = transparency;
+        let style: isize = 1;
+        let _: () = msg_send![view, setStyle: style];
+    }
+}
+
+#[tauri::command]
+fn hermes_info() -> Value {
+    json!({ "installed": hermes::is_installed() })
+}
+
+#[tauri::command]
+fn glass_info() -> Value {
+    json!({ "liquid_glass": LIQUID_GLASS.load(Ordering::SeqCst) })
 }
 
 fn position_bottom_center(window: &WebviewWindow) {
     if let Ok(Some(mon)) = window.primary_monitor() {
         let scale = mon.scale_factor();
         let ms = mon.size().to_logical::<f64>(scale);
-        let x = (ms.width - BAR_W) / 2.0;
-        let y = ms.height - BAR_H - 96.0; // clear the dock
+        // Pill bottom stays 96pt above the screen bottom (clear the dock).
+        let x = (ms.width - ENV_W) / 2.0;
+        let y = ms.height - ENV_H - 96.0;
         let _ = window.set_position(tauri::LogicalPosition::new(x, y));
     }
 }
@@ -211,12 +783,16 @@ fn get_settings(state: tauri::State<'_, Arc<AppState>>) -> Settings {
 }
 
 #[tauri::command]
-async fn list_models() -> Vec<String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let resp = ureq::get("http://localhost:11434/api/tags")
+async fn list_models(provider: Option<String>) -> Vec<String> {
+    let provider = provider.unwrap_or_else(persisted_provider);
+    tauri::async_runtime::spawn_blocking(move || match provider.as_str() {
+        // Ollama is the only provider that can be enumerated live; everything
+        // else gets a curated shortlist, because these run on EVERY voice turn
+        // and the big models are the wrong tool for a one-sentence reply.
+        "ollama" => ureq::get("http://localhost:11434/api/tags")
             .timeout(Duration::from_secs(3))
-            .call();
-        resp.ok()
+            .call()
+            .ok()
             .and_then(|r| r.into_json::<Value>().ok())
             .and_then(|v| v.get("models").and_then(|m| m.as_array()).cloned())
             .map(|arr| {
@@ -227,10 +803,34 @@ async fn list_models() -> Vec<String> {
                 names.sort();
                 names
             })
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        "anthropic" => ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        "openai" => ["gpt-4o-mini", "gpt-4o"].iter().map(|s| s.to_string()).collect(),
+        // The CLI decides its own model (whatever you're signed in with), so
+        // there is nothing to choose here.
+        _ => vec!["subscription".to_string()],
     })
     .await
     .unwrap_or_default()
+}
+
+/// Whether each provider can actually be used right now, so the picker can grey
+/// out what would fail and say why.
+#[tauri::command]
+fn provider_status() -> Value {
+    let mut out = serde_json::Map::new();
+    for p in brain::PROVIDERS {
+        let b = brain::resolve(p, "");
+        let why = b.unavailable();
+        out.insert(
+            p.to_string(),
+            json!({ "ok": why.is_none(), "detail": why.unwrap_or_default() }),
+        );
+    }
+    Value::Object(out)
 }
 
 /// First-run setup: probe the local stack (Python, venv, Whisper/Kokoro/Piper,
@@ -272,6 +872,9 @@ async fn set_settings(
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut restart = false;
+        let mut engine_changed = false;
+        let mut stt_changed = false;
+        let mut key_changed = false;
         {
             let mut settings = st.settings.lock().unwrap();
             if let Some(m) = next.get("model").and_then(|v| v.as_str()) {
@@ -285,18 +888,121 @@ async fn set_settings(
                     restart = true;
                 }
             }
+            // No daemon restart: this is read per announcement, not at spawn.
+            if let Some(r) = next.get("agent_reply").and_then(|v| v.as_str()) {
+                if AGENT_REPLY_MODES.contains(&r) {
+                    settings.agent_reply = r.to_string();
+                }
+            }
+            if let Some(n) = next.get("agent_reply_max_chars").and_then(|v| v.as_u64()) {
+                settings.agent_reply_max_chars = (n as usize).clamp(120, 2000);
+            }
+            if let Some(pv) = next.get("provider").and_then(|v| v.as_str()) {
+                if brain::PROVIDERS.contains(&pv) {
+                    settings.provider = pv.to_string();
+                }
+                // Re-check unconditionally, NOT only when the provider changed:
+                // the two can already be out of step (env var, edited file), and
+                // picking the provider that is displayed must repair that rather
+                // than be a no-op.
+                if !brain::model_fits(&settings.provider, &settings.model) {
+                    settings.model = brain::default_model(&settings.provider).to_string();
+                }
+            }
+            if let Some(f) = next.get("dictation_format").and_then(|v| v.as_str()) {
+                if DICTATION_FORMATS.contains(&f) {
+                    settings.dictation_format = f.to_string();
+                }
+            }
+            if let Some(m) = next.get("stt_model").and_then(|v| v.as_str()) {
+                if m != settings.stt_model && setup::STT_MODELS.iter().any(|(id, _, _)| *id == m) {
+                    settings.stt_model = m.to_string();
+                    stt_changed = true;
+                }
+            }
+            if let Some(k) = next.get("dictation_key").and_then(|v| v.as_str()) {
+                if k != settings.dictation_key && hotkey::KEYS.contains(&k) {
+                    settings.dictation_key = k.to_string();
+                    key_changed = true;
+                }
+            }
+            // No restart: every workspace lookup re-reads it.
+            if let Some(b) = next.get("backend").and_then(|v| v.as_str()) {
+                let b = b.to_lowercase();
+                if BACKENDS.contains(&b.as_str()) {
+                    settings.backend = b;
+                }
+            }
+            // Read per tick by the Hermes watcher: no restart.
+            if let Some(h) = next.get("hermes_voice").and_then(|v| v.as_bool()) {
+                settings.hermes_voice = h;
+            }
+            // Pure appearance / UI timing: no restart, applied right here.
+            if let Some(t) = next.get("glass_transparency").and_then(|v| v.as_u64()) {
+                settings.glass_transparency = t.min(100) as u8;
+                apply_glass_style(&app, settings.glass_transparency);
+            }
+            if let Some(n) = next.get("drop_after_secs").and_then(|v| v.as_u64()) {
+                settings.drop_after_secs = n.min(24 * 3600);
+            }
+            if let Some(e) = next.get("tts_engine").and_then(|v| v.as_str()) {
+                let e = e.to_lowercase();
+                if TTS_ENGINES.contains(&e.as_str()) && e != settings.tts_engine {
+                    settings.tts_engine = e;
+                    restart = true;
+                    engine_changed = true;
+                }
+            }
             save_settings(&settings);
         }
         if restart {
-            // Reset conversation so the model doesn't carry wrong-language turns.
-            st.history.lock().unwrap().clear();
-            daemons::restart_daemons(&st, app);
+            if !engine_changed {
+                // Language change: reset the conversation so the model doesn't
+                // carry wrong-language turns. An engine change is not a
+                // conversation change.
+                st.history.lock().unwrap().clear();
+            }
+            daemons::restart_daemons(&st, app.clone());
+        } else if stt_changed {
+            daemons::restart_stt(&st);
+        }
+        if key_changed {
+            apply_dictation_key(&app, &st.settings.lock().unwrap().dictation_key);
+        }
+        // The whole point of an A/B is hearing the new voice NOW.
+        // `startup_brief_done` stays true, so nothing else would speak until
+        // the next turn and the change would feel like it did nothing.
+        if engine_changed {
+            let (st2, app2) = (st.clone(), app.clone());
+            std::thread::spawn(move || {
+                for _ in 0..200 {
+                    let ready = st2.tts.lock().unwrap().as_ref().map(|d| d.is_ready()).unwrap_or(false);
+                    if ready {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                let en = st2.settings.lock().unwrap().language == "en";
+                speech::speak(&app2, &st2, tts_sample_line(en));
+            });
         }
         let s = st.settings.lock().unwrap().clone();
-        Ok(json!({ "model": s.model, "language": s.language, "restarted": restart }))
+        let mut out = serde_json::to_value(&s).unwrap_or_else(|_| json!({}));
+        out["restarted"] = json!(restart || stt_changed);
+        Ok(out)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Not "hello": the sample has to exercise what the A/B is actually about —
+/// a project name, accents, an acronym, and digits.
+fn tts_sample_line(en: bool) -> &'static str {
+    if en {
+        "The agent on marseille is done — pull request 42 is ready for review."
+    } else {
+        "L'agent sur marseille a terminé, la pull request numéro 42 est prête à relire."
+    }
 }
 
 #[tauri::command]
@@ -347,6 +1053,78 @@ async fn voice_input(
     .map_err(|e| e.to_string())
 }
 
+/// The ⌥⇧Space combination goes through the global-shortcut plugin; every
+/// other dictation key through the event tap (hotkey.rs).
+fn alt_shift_space() -> Shortcut {
+    Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::Space)
+}
+
+fn apply_dictation_key(app: &AppHandle, key: &str) {
+    let k = hotkey::Key::parse(key);
+    hotkey::set_key(k);
+    let gs = app.global_shortcut();
+    let combo = alt_shift_space();
+    let r = if k == hotkey::Key::AltShiftSpace {
+        if gs.is_registered(combo) { Ok(()) } else { gs.register(combo) }
+    } else if gs.is_registered(combo) {
+        gs.unregister(combo)
+    } else {
+        Ok(())
+    };
+    if let Err(e) = r {
+        eprintln!("[vox] dictation key {key}: {e}");
+    }
+    println!("[vox] dictation key = {key}");
+}
+
+#[tauri::command]
+fn settings_defaults() -> Settings {
+    Settings::default()
+}
+
+#[tauri::command]
+fn stt_models() -> Vec<Value> {
+    setup::STT_MODELS
+        .iter()
+        .map(|(id, label, detail)| json!({ "id": id, "label": label, "detail": detail, "installed": setup::stt_installed(id) }))
+        .collect()
+}
+
+#[tauri::command]
+async fn install_stt(app: AppHandle, model: String) -> Result<Value, String> {
+    if !setup::STT_MODELS.iter().any(|(id, _, _)| *id == model) {
+        return Err(format!("unknown model \"{model}\""));
+    }
+    tauri::async_runtime::spawn_blocking(move || setup::install_stt(&app, &model))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn accessibility_status() -> bool {
+    dictation::accessibility_trusted(false)
+}
+
+#[tauri::command]
+fn request_accessibility() -> bool {
+    dictation::accessibility_trusted(true)
+}
+
+#[tauri::command]
+fn fn_key_status() -> Value {
+    json!({ "globe_does_nothing": hotkey::globe_does_nothing() })
+}
+
+#[tauri::command]
+fn get_vocabulary() -> dictation::Vocabulary {
+    dictation::load_vocabulary()
+}
+
+#[tauri::command]
+fn set_vocabulary(vocab: dictation::Vocabulary) -> Result<(), String> {
+    dictation::save_vocabulary(vocab)
+}
+
 #[tauri::command]
 fn audio_done(state: tauri::State<'_, Arc<AppState>>, id: u64) {
     let mut guard = state.audio_done.lock().unwrap();
@@ -358,16 +1136,62 @@ fn audio_done(state: tauri::State<'_, Arc<AppState>>, id: u64) {
     }
 }
 
+/// Animate the native blur to the pill's new size (the page animates the
+/// visible shape itself). Same curve as the CSS: cubic-bezier(0.32,0.72,0,1).
 #[tauri::command]
-fn resize_window(
-    window: WebviewWindow,
-    state: tauri::State<'_, Arc<AppState>>,
-    width: f64,
-    height: f64,
-) {
-    let gen = state.anim_gen.fetch_add(1, Ordering::SeqCst) + 1;
-    let st = state.inner().clone();
-    std::thread::spawn(move || animate_frame(window, st, gen, width, height));
+fn set_pill_frame(window: WebviewWindow, width: f64, height: f64, duration_ms: u64) {
+    let target = pill_rect(width, height);
+    {
+        let mut g = PILL_STATE.lock().unwrap();
+        let now = std::time::Instant::now();
+        // Start from where the pill IS (mid-flight if interrupted), like the
+        // CSS transition and Core Animation both do.
+        let from = g.map(|a| a.rect_at(now)).unwrap_or(PILL_BASE);
+        *g = Some(PillAnim { from, to: target, start: now, dur: Duration::from_millis(duration_ms) });
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = window.run_on_main_thread(move || unsafe {
+            use objc2::msg_send;
+            use objc2::runtime::{AnyClass, AnyObject};
+            use objc2_foundation::{NSPoint, NSRect, NSSize};
+            let view = PILL_BG_VIEW.load(Ordering::SeqCst) as *mut AnyObject;
+            if view.is_null() {
+                return;
+            }
+            sync_pill_radius();
+            let rect = NSRect::new(
+                NSPoint::new(target.x, target.y),
+                NSSize::new(target.w, target.h),
+            );
+            if duration_ms == 0 {
+                let _: () = msg_send![view, setFrame: rect];
+                return;
+            }
+            let _: () = msg_send![AnyClass::get(c"NSAnimationContext").unwrap(), beginGrouping];
+            let ctx: *mut AnyObject =
+                msg_send![AnyClass::get(c"NSAnimationContext").unwrap(), currentContext];
+            let _: () = msg_send![ctx, setDuration: duration_ms as f64 / 1000.0];
+            if let Some(cls) = AnyClass::get(c"CAMediaTimingFunction") {
+                // `functionWithControlPoints::::` has empty selector labels,
+                // which msg_send! can't spell — register the Sel by hand.
+                use objc2::runtime::Sel;
+                use objc2::runtime::MessageReceiver;
+                let sel = Sel::register(c"functionWithControlPoints::::");
+                let tf: *mut AnyObject =
+                    cls.send_message(sel, (0.32f32, 0.72f32, 0.0f32, 1.0f32));
+                if !tf.is_null() {
+                    let _: () = msg_send![ctx, setTimingFunction: tf];
+                }
+            }
+            let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
+            let anim: *mut AnyObject = msg_send![view, animator];
+            let _: () = msg_send![anim, setFrame: rect];
+            let _: () = msg_send![AnyClass::get(c"NSAnimationContext").unwrap(), endGrouping];
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
 }
 
 /// Interrupt whatever Vox is currently saying — ⌥Space or barge-in. Bumps the
@@ -381,13 +1205,119 @@ fn interrupt(state: tauri::State<'_, Arc<AppState>>) {
     }
 }
 
+/// Move the pill by a logical-pixel delta. The renderer owns dragging: see the
+/// setMovableByWindowBackground call in `setup` for why AppKit can't.
+#[tauri::command]
+fn move_pill(window: WebviewWindow, dx: f64, dy: f64) {
+    let scale = window.scale_factor().unwrap_or(2.0);
+    if let Ok(pos) = window.outer_position() {
+        let _ = window.set_position(tauri::LogicalPosition::new(
+            pos.x as f64 / scale + dx,
+            pos.y as f64 / scale + dy,
+        ));
+    }
+}
+
+/// Mirror the renderer's pill state into the backend. Called from `setState`
+/// on every transition. Proactive speech (agent-completion announcements) waits
+/// for a resting code — see `ui_at_rest`.
+#[tauri::command]
+fn ui_state(state: tauri::State<'_, Arc<AppState>>, code: u8) {
+    state.ui_busy.store(code, Ordering::SeqCst);
+    state.ui_busy_at.store(now_unix(), Ordering::SeqCst);
+}
+
+/// Install an optional speech engine (Qwen3-TTS). Separate from `run_setup`
+/// on purpose: it must never gate launch.
+#[tauri::command]
+async fn install_engine(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    name: String,
+) -> Result<Value, String> {
+    if name != "qwen3" {
+        return Err(format!("unknown engine \"{name}\""));
+    }
+    let st = state.inner().clone();
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let res = setup::install_qwen(&handle);
+        if res.is_ok() {
+            // Re-probe paths so the engine becomes selectable without a restart.
+            daemons::init_paths(&st, &handle);
+        }
+        res
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Stop every running agent — voice ("stop", "arrête les agents") or a click on
+/// the badge. A one-second remedy for ANY launch mistake, including ones a
+/// confirmation prompt would never have caught (right repo, wrong task).
+#[tauri::command]
+fn kill_agents(app: AppHandle, state: tauri::State<'_, Arc<AppState>>) -> usize {
+    agents::kill_all(&app, &state.inner().clone())
+}
+
+/// Finished agent answers, newest first — for the UI and for debugging.
+#[tauri::command]
+fn recent_results(state: tauri::State<'_, Arc<AppState>>) -> Vec<Value> {
+    state
+        .agent_results
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .map(|r| {
+            json!({
+                "project": r.project,
+                "source": r.source,
+                "outcome": r.outcome,
+                "task": r.task,
+                "answer": r.answer_full,
+                "finished_unix": r.finished_unix,
+            })
+        })
+        .collect()
+}
+
+/// Speak the announcement backlog now (badge click): clears the interrupt
+/// back-off so held items go out on the drainer's next pass.
+#[tauri::command]
+fn speak_pending_announcements(state: tauri::State<'_, Arc<AppState>>) {
+    announce::speak_now(&state.inner().clone());
+}
+
+/// Re-speak the most recent agent answer ("redis-moi ça").
+#[tauri::command]
+fn replay_last_result(app: AppHandle, state: tauri::State<'_, Arc<AppState>>) {
+    let st = state.inner().clone();
+    std::thread::spawn(move || {
+        let (en, text) = {
+            let s = st.settings.lock().unwrap();
+            let en = s.language == "en";
+            drop(s);
+            let last = st.agent_results.lock().unwrap().back().cloned();
+            let text = match last {
+                Some(r) => announce::strip_for_speech(&r.answer_full, en),
+                None => (if en { "Nothing to replay yet." } else { "Rien à redire pour l'instant." })
+                    .to_string(),
+            };
+            (en, text)
+        };
+        let _ = en;
+        speech::speak(&app, &st, &text);
+    });
+}
+
 /// Re-run the worktree recap on demand (recap button next to the gear).
 #[tauri::command]
 fn replay_recap(app: AppHandle, state: tauri::State<'_, Arc<AppState>>) {
     let st = state.inner().clone();
     std::thread::spawn(move || {
         st.startup_brief_done.store(false, Ordering::SeqCst);
-        if !conductor::speak_startup_brief(&app, &st) {
+        if !workspace::speak_startup_brief(&app, &st) {
             // A button press deserves a reply even when there's nothing.
             let en = st.settings.lock().unwrap().language == "en";
             speech::speak(
@@ -474,7 +1404,7 @@ fn pronunciations_path() -> PathBuf {
 }
 
 /// Word → phonetic respelling, applied to TTS input so the voice says tricky
-/// names the way you want (e.g. {"Conductor": "conedeuctor"}). Edited via
+/// names the way you want (e.g. {"Orca": "orka"}). Edited via
 /// ~/.vox/pronunciations.json. Voice-cloning is out of scope for Kokoro.
 pub fn load_pronunciations() -> Vec<(String, String)> {
     std::fs::read_to_string(pronunciations_path())
@@ -490,10 +1420,151 @@ pub fn load_pronunciations() -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+// ── Mac-app chrome: menu bar, tray, show/hide ────────────────────────────────
+
+/// What ⌘, used to do as a global shortcut. Now driven by the app menu and the
+/// tray, so it no longer steals Preferences from every other app.
+fn toggle_settings(app: &AppHandle) {
+    let _ = app.emit("toggle-settings", ());
+}
+
+/// Bring the pill back. `pill-shown` replays the entrance animation, which only
+/// fires once the window is actually visible (see the startup re-show).
+fn show_pill(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.emit("pill-shown", ());
+    }
+}
+
+/// Hide, never destroy: the pill is the whole app, and a windowless-but-running
+/// Vox would have no way back except the global shortcut.
+fn hide_pill(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
+}
+
+fn toggle_pill(app: &AppHandle) {
+    match app.get_webview_window("main").and_then(|w| w.is_visible().ok()) {
+        Some(true) => hide_pill(app),
+        _ => show_pill(app),
+    }
+}
+
+/// Native menu bar. Without it an app has no ⌘Q / ⌘W / ⌘C and text fields in
+/// settings lose copy-paste (the Edit items are what route those key
+/// equivalents to the webview).
+fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let settings = MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
+    let app_menu = Submenu::with_items(
+        app,
+        "Vox",
+        true,
+        &[
+            &PredefinedMenuItem::about(app, Some("About Vox"), None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &settings,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::show_all(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::quit(app, None)?,
+        ],
+    )?;
+    let edit_menu = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    let window_menu = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &MenuItem::with_id(app, "close-pill", "Close", true, Some("CmdOrCtrl+W"))?,
+            &MenuItem::with_id(app, "show-pill", "Show Vox", true, None::<&str>)?,
+        ],
+    )?;
+    Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu])
+}
+
+/// Menu-bar icon: the way back to a hidden pill, and a Quit that is always
+/// reachable. Menu clicks are handled by the app-wide `on_menu_event`.
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let menu = Menu::with_items(
+        app,
+        &[
+            &MenuItem::with_id(app, "tray-toggle", "Show / Hide Vox", true, None::<&str>)?,
+            &MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "tray-quit", "Quit Vox", true, None::<&str>)?,
+        ],
+    )?;
+    let mut tray = TrayIconBuilder::new().menu(&menu);
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
+fn on_menu_event(app: &AppHandle, id: &str) {
+    match id {
+        "settings" => {
+            // Settings render inside the pill, so it has to be on screen.
+            show_pill(app);
+            toggle_settings(app);
+        }
+        "close-pill" => hide_pill(app),
+        "show-pill" => show_pill(app),
+        "tray-toggle" => toggle_pill(app),
+        "tray-quit" => app.exit(0),
+        _ => {}
+    }
+}
+
+/// Runs on every way out (⌘Q, tray Quit, Dock Quit). Exiting the process does
+/// not run Drop on managed state, so without this the Python speech daemons
+/// and any running agents would be orphaned.
+fn shutdown(app: &AppHandle, state: &Arc<AppState>) {
+    audio_route::duck_other_audio(false);
+    audio_route::restore_mic_route();
+    // Local only: agents running in Orca outlive Vox and must not be closed by it.
+    agents::kill_local(app, state);
+    if let Ok(mut g) = state.stt.lock() {
+        if let Some(mut d) = g.take() {
+            d.kill();
+        }
+    }
+    if let Ok(mut g) = state.tts.lock() {
+        if let Some(mut d) = g.take() {
+            d.kill();
+        }
+    }
+}
+
 // ── App entry ────────────────────────────────────────────────────────────────
 
 pub fn run() {
+    // First thing, so even startup failures land in the log.
+    logfile::init();
     let settings = load_settings();
+    // Write back immediately. load_settings repairs an incoherent
+    // provider/model pair and fills in fields absent from an older file; without
+    // this the file keeps contradicting the running app until some unrelated
+    // setting happens to change.
+    save_settings(&settings);
     let active_project = std::env::var("VOX_PROJECT")
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| home()).to_string_lossy().to_string());
 
@@ -504,52 +1575,97 @@ pub fn run() {
         tts: Mutex::new(None),
         audio_done: Mutex::new(None),
         play_id: AtomicU64::new(0),
-        agent_count: AtomicI64::new(0),
+        agents: Mutex::new(Vec::new()),
+        agent_seq: AtomicU64::new(0),
         active_project: Mutex::new(active_project),
         startup_brief_done: AtomicBool::new(false),
         interrupt_gen: AtomicU64::new(0),
-        anim_gen: AtomicU64::new(0),
         paths: Mutex::new(Paths {
             stt_script: None,
             tts_script: None,
             tts_piper_script: None,
+            tts_qwen_script: None,
+            tts_qwen_python: None,
             stt_python: None,
             tts_python: None,
             whisper_cli: None,
             claude_cli: None,
         }),
         speak_lock: Mutex::new(()),
+        ui_busy: AtomicU8::new(UI_IDLE),
+        ui_busy_at: AtomicU64::new(0),
+        agent_results: Mutex::new(VecDeque::new()),
+        announce_q: Arc::new((Mutex::new(announce::Queue::default()), Condvar::new())),
+        last_proposal_at: AtomicU64::new(0),
+        vox_cwds: Mutex::new(Vec::new()),
+        orca_launches: Mutex::new(Vec::new()),
+        orca_working: AtomicUsize::new(0),
     });
 
     let alt_space = Shortcut::new(Some(Modifiers::ALT), Code::Space);
-    let cmd_comma = Shortcut::new(Some(Modifiers::SUPER), Code::Comma);
+    let dictate = alt_shift_space();
+    let exit_state = state.clone();
 
     tauri::Builder::default()
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, shortcut, event| {
+                    // Dictation is push-to-talk: it needs the release too.
+                    if shortcut == &dictate {
+                        let _ = app;
+                        dictation::on_key(event.state() == ShortcutState::Pressed);
+                        return;
+                    }
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
                     if shortcut == &alt_space {
                         let _ = app.emit("toggle-listening", ());
-                    } else if shortcut == &cmd_comma {
-                        let _ = app.emit("toggle-settings", ());
                     }
                 })
                 .build(),
         )
         .manage(state.clone())
+        .on_menu_event(|app, event| on_menu_event(app, event.id().as_ref()))
+        .on_window_event(|window, event| {
+            // ⌘W / the red button must never destroy the only window.
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            audio_route::route_mic_away_from_bluetooth,
+            audio_route::restore_mic_route,
+            audio_route::duck_other_audio,
             get_settings,
+            hermes_info,
             set_settings,
+            
             list_models,
+            provider_status,
             probe_setup,
             run_setup,
             voice_input,
+            settings_defaults,
+            stt_models,
+            install_stt,
+            accessibility_status,
+            request_accessibility,
+            fn_key_status,
+            get_vocabulary,
+            set_vocabulary,
             audio_done,
-            resize_window,
+            set_pill_frame,
+            glass_info,
             interrupt,
+            ui_state,
+            move_pill,
+            install_engine,
+            kill_agents,
+            recent_results,
+            speak_pending_announcements,
+            replay_last_result,
             replay_recap,
             get_version,
             check_update,
@@ -558,9 +1674,26 @@ pub fn run() {
         .setup(move |app| {
             println!("[vox] starting pid={}", std::process::id());
 
-            // Floating accessory — no dock icon, follows every Space.
+            // Prompt for microphone access up front so the webview mic isn't a
+            // silent stream (see request_microphone_access).
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            request_microphone_access();
+
+            // A real Mac app: Dock icon, ⌘Tab entry, menu bar (⌘Q / ⌘W). The
+            // pill still floats over every Space — that comes from the
+            // non-activating NSPanel below, not from the activation policy.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Regular);
+
+            match build_menu(app.handle()) {
+                Ok(menu) => {
+                    let _ = app.set_menu(menu);
+                }
+                Err(e) => eprintln!("[vox] menu failed: {e}"),
+            }
+            if let Err(e) = build_tray(app.handle()) {
+                eprintln!("[vox] tray icon failed: {e}");
+            }
 
             let window = app.get_webview_window("main").expect("main window");
             let _ = window.set_visible_on_all_workspaces(true);
@@ -589,15 +1722,89 @@ pub fn run() {
                 use objc2::runtime::AnyObject;
                 let ns_win = ptr as *mut AnyObject;
                 unsafe {
-                    // canJoinAllSpaces (1<<0) | fullScreenAuxiliary (1<<8)
-                    let behavior: usize = (1 << 0) | (1 << 8);
+                    // Turn the window into a non-activating NSPanel.
+                    //
+                    // This is what makes the pill follow you onto EVERY desktop,
+                    // including another app's fullscreen Space. A plain NSWindow
+                    // with canJoinAllSpaces is honoured on ordinary desktops but
+                    // WindowServer refuses to composite it over a third-party
+                    // fullscreen Space — the long-standing bug in TODOS.md. A
+                    // non-activating panel is the shape overlay bars (Spotlight,
+                    // Raycast) use, and it is allowed there.
+                    //
+                    // Swizzling the class of a live window is how tauri-nspanel
+                    // does it too. Guarded: if NSPanel can't be found we simply
+                    // keep the plain window rather than crash.
+                    if let Some(panel_cls) = pill_panel_class() {
+                        objc2::ffi::object_setClass(ns_win as *mut _, panel_cls);
+                        // NSWindowStyleMaskNonactivatingPanel (1<<7) is only
+                        // honoured by NSPanel — hence the class change first.
+                        let mask: usize = msg_send![ns_win, styleMask];
+                        let _: () = msg_send![ns_win, setStyleMask: mask | (1 << 7)];
+                        let _: () = msg_send![ns_win, setFloatingPanel: true];
+                        // Accessory apps "deactivate" constantly; without this
+                        // the panel would vanish every time you click elsewhere.
+                        let _: () = msg_send![ns_win, setHidesOnDeactivate: false];
+                        println!("[vox] pill is a non-activating NSPanel");
+                    }
+
+                    // canJoinAllSpaces (1<<0) — present on every desktop
+                    // ignoresCycle (1<<6) — never a ⌘-Tab / ⌘-` destination
+                    // fullScreenAuxiliary (1<<8) — allowed over fullscreen Spaces
+                    //
+                    // NOT stationary (1<<4): that pins the window like the
+                    // desktop picture, which is the opposite of following you.
+                    let behavior: usize = (1 << 0) | (1 << 6) | (1 << 8);
                     let _: () = msg_send![ns_win, setCollectionBehavior: behavior];
-                    let level: isize = 25; // NSStatusWindowLevel
-                    let _: () = msg_send![ns_win, setLevel: level];
+                    // NSPopUpMenuWindowLevel, not NSStatusWindowLevel (25):
+                    // 25 sits at the same height as other apps' status windows,
+                    // so activating one of those could bury the pill. 101 keeps
+                    // it above them while staying below the screen saver and
+                    // the lock screen.
+                    let _: () = msg_send![ns_win, setLevel: PILL_WINDOW_LEVEL];
                     // Accessory-policy apps don't get their windows ordered
                     // front automatically — force it.
                     let _: () = msg_send![ns_win, orderFrontRegardless];
-                    // Make the whole pill draggable. `data-tauri-drag-region`'s
+                    // Re-assert AFTER the class swizzle: setStyleMask on the
+                    // freshly-converted panel can clear it, and losing it makes
+                    // the pill undraggable.
+                    let _: () = msg_send![ns_win, setMovable: true];
+
+                    // Force the vibrancy material to render DARK.
+                    //
+                    // The grey cast wasn't the CSS tint — it was the
+                    // NSVisualEffectView following the system appearance, so on
+                    // a light desktop the blur itself came back light and no
+                    // amount of lowering the CSS alpha could fix it (less alpha
+                    // just showed MORE of the light blur). Pinning the window to
+                    // the vibrant-dark appearance makes the material dark at the
+                    // source, which is what lets the tint be thin AND the pill
+                    // stay dark.
+                    // Built through the runtime rather than pulling in
+                    // objc2-foundation for one string.
+                    if let (Some(str_cls), Some(app_cls)) = (
+                        objc2::runtime::AnyClass::get(c"NSString"),
+                        objc2::runtime::AnyClass::get(c"NSAppearance"),
+                    ) {
+                        let name: *mut objc2::runtime::AnyObject = msg_send![
+                            str_cls,
+                            stringWithUTF8String: c"NSAppearanceNameVibrantDark".as_ptr()
+                        ];
+                        let appearance: *mut objc2::runtime::AnyObject =
+                            msg_send![app_cls, appearanceNamed: name];
+                        if !appearance.is_null() {
+                            let _: () = msg_send![ns_win, setAppearance: appearance];
+                            println!("[vox] pill appearance pinned to vibrant dark");
+                        }
+                    }
+                    // Dragging is driven from the renderer (the `move_pill`
+                    // command), NOT by AppKit. A non-activating NSPanel never
+                    // becomes key on click, so AppKit's background-drag loop
+                    // doesn't engage — the pill became immovable the moment it
+                    // was converted. Leaving this true as well would double
+                    // every movement if AppKit ever did engage.
+                    let _: () = msg_send![ns_win, setMovableByWindowBackground: false];
+                    // (kept for reference) `data-tauri-drag-region`'s
                     // startDragging path is unreliable on a borderless status-
                     // level accessory window; AppKit's own background-drag is
                     // rock-solid and still lets clicks reach the webview
@@ -618,24 +1825,141 @@ pub fn run() {
                         views.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>()
                     );
                     for (v, name) in &views {
+                        if name.contains("VisualEffect") {
+                            // Detach the blur from the window size: it must
+                            // stop filling the envelope and instead be framed
+                            // (and animated) to the pill rect. Its corner radius
+                            // (private setCornerRadius:, set by window-vibrancy)
+                            // scales with the frame, so it stays pill-shaped.
+                            PILL_BG_VIEW.store(*v as usize, Ordering::SeqCst);
+                            let _: () = msg_send![*v, setAutoresizingMask: 0usize];
+                            let base = objc2_foundation::NSRect::new(
+                                objc2_foundation::NSPoint::new(PILL_BASE.x, PILL_BASE.y),
+                                objc2_foundation::NSSize::new(PILL_BASE.w, PILL_BASE.h),
+                            );
+                            let _: () = msg_send![*v, setFrame: base];
+                        }
                         if name.contains("WebView") {
                             // Re-adding an attached subview moves it to the top
                             // of the sibling stack — above the vibrancy view.
                             let _: () = msg_send![content, addSubview: *v];
                             println!("[vox] raised {name} above vibrancy view");
+                            // The webview now covers the whole transparent
+                            // envelope; the pill clip is CSS, not a layer mask.
                         }
                     }
+
+                    // Liquid Glass (macOS 26+): swap the blur for a real
+                    // NSGlassEffectView — refraction, specular rim, and the
+                    // "clear" style that makes the idle water drop read as a
+                    // bead of glass. Same frame/animation path as the blur;
+                    // the old vibrancy view stays as the fallback, hidden.
+                    let webview = views.iter().find(|(_, n)| n.contains("WebView")).map(|(v, _)| *v);
+                    if let (Some(glass_cls), Some(webview)) =
+                        (objc2::runtime::AnyClass::get(c"NSGlassEffectView"), webview)
+                    {
+                        let base = objc2_foundation::NSRect::new(
+                            objc2_foundation::NSPoint::new(PILL_BASE.x, PILL_BASE.y),
+                            objc2_foundation::NSSize::new(PILL_BASE.w, PILL_BASE.h),
+                        );
+                        let glass: *mut AnyObject = msg_send![glass_cls, alloc];
+                        let glass: *mut AnyObject = msg_send![glass, initWithFrame: base];
+                        if !glass.is_null() {
+                            let _: () = msg_send![glass, setAutoresizingMask: 0usize];
+                            let _: () = msg_send![glass, setCornerRadius: PILL_RADIUS];
+                            // Adaptive appearance OFF. By default (2 = "on")
+                            // the glass samples what's behind it and flips to a
+                            // white or black wash when the backdrop goes very
+                            // light or dark — the random "filters" over the
+                            // pill. Private (_adaptiveAppearance: 0 automatic,
+                            // 1 off, 2 on; read back via
+                            // _adaptationDebugDescription on macOS 26), so
+                            // guarded: unknown OS → keep the default.
+                            let sel = objc2::runtime::Sel::register(c"set_adaptiveAppearance:");
+                            let ok: bool = msg_send![glass, respondsToSelector: sel];
+                            if ok {
+                                let _: () = msg_send![glass, set_adaptiveAppearance: 1isize];
+                            }
+                            // NSWindowBelow = -1: under the page, above nothing.
+                            let _: () = msg_send![
+                                content,
+                                addSubview: glass,
+                                positioned: -1isize,
+                                relativeTo: webview
+                            ];
+                            let old = PILL_BG_VIEW.swap(glass as usize, Ordering::SeqCst) as *mut AnyObject;
+                            if !old.is_null() {
+                                let _: () = msg_send![old, setHidden: true];
+                            }
+                            LIQUID_GLASS.store(true, Ordering::SeqCst);
+                            let t = app.state::<Arc<AppState>>().settings.lock().unwrap().glass_transparency;
+                            set_glass_style(t);
+                            println!("[vox] pill background: Liquid Glass (NSGlassEffectView)");
+                        }
+                    }
+                    PILL_RADIUS_NOW.store(PILL_RADIUS.to_bits(), Ordering::SeqCst);
                 }
             }
 
             position_bottom_center(&window);
 
+            // Click-through poller. The envelope is mostly transparent; AppKit
+            // would still swallow clicks there. Every 16ms, toggle
+            // setIgnoresMouseEvents: by whether the cursor is inside the pill
+            // hit rect, and tell the renderer about hover (CSS :hover is dead
+            // while the window ignores events).
+            #[cfg(target_os = "macos")]
+            if let Ok(ptr) = window.ns_window() {
+                let win_addr = ptr as usize;
+                let win = window.clone();
+                let ignoring = Arc::new(AtomicBool::new(false));
+                let hovered = Arc::new(AtomicBool::new(false));
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(Duration::from_millis(16));
+                    let (win2, ignoring, hovered) = (win.clone(), ignoring.clone(), hovered.clone());
+                    let _ = win.run_on_main_thread(move || unsafe {
+                        use objc2::msg_send;
+                        use objc2::runtime::{AnyClass, AnyObject};
+                        use objc2_foundation::{NSPoint, NSRect};
+                        let ns_win = win_addr as *mut AnyObject;
+                        // Native read: we're already on the main thread, no
+                        // need for tauri's cross-thread getter round-trip.
+                        let visible: bool = msg_send![ns_win, isVisible];
+                        if !visible {
+                            return;
+                        }
+                        let ev = AnyClass::get(c"NSEvent").unwrap();
+                        let pt: NSPoint = msg_send![ev, mouseLocation];
+                        let buttons: usize = msg_send![ev, pressedMouseButtons];
+                        let fr: NSRect = msg_send![ns_win, frame];
+                        // Corner radius follows the animating height (see
+                        // sync_pill_radius) — a no-op once settled.
+                        sync_pill_radius();
+                        let h = current_hit_rect();
+                        let (rx, ry) = (fr.origin.x + h.x, fr.origin.y + h.y);
+                        let mut inside = pt.x >= rx && pt.x <= rx + h.w && pt.y >= ry && pt.y <= ry + h.h;
+                        // A drag/click in progress must never lose its events.
+                        if buttons != 0 && !ignoring.load(Ordering::SeqCst) {
+                            inside = true;
+                        }
+                        let want_ignore = !inside;
+                        if ignoring.swap(want_ignore, Ordering::SeqCst) != want_ignore {
+                            let _: () = msg_send![ns_win, setIgnoresMouseEvents: want_ignore];
+                        }
+                        if hovered.swap(inside, Ordering::SeqCst) != inside {
+                            let _ = win2.emit("pill-hover", inside);
+                        }
+                    });
+                });
+            }
+
             if let Err(e) = app.global_shortcut().register(alt_space) {
                 eprintln!("[vox] failed to register Alt+Space: {e}");
             }
-            if let Err(e) = app.global_shortcut().register(cmd_comma) {
-                eprintln!("[vox] failed to register Cmd+,: {e}");
-            }
+            // Dictation: Fn & co. through the event tap, ⌥⇧Space through the plugin.
+            dictation::init(app.handle().clone(), state.clone());
+            apply_dictation_key(app.handle(), &state.settings.lock().unwrap().dictation_key);
+            hotkey::start();
 
             #[cfg(debug_assertions)]
             if std::env::var("VOX_DEVTOOLS").is_ok() {
@@ -649,6 +1973,78 @@ pub fn run() {
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(400));
                     let _ = w.show();
+                    // Fire the entrance at the exact moment the window becomes
+                    // visible. Running it at page load instead would play it
+                    // while the window is still hidden — i.e. not at all.
+                    let _ = w.emit("pill-shown", ());
+                });
+            }
+
+            // Keep the pill on top across app switches. Activating another app
+            // can re-order the window stack, and an accessory-policy app gets
+            // no activation callback to react to — so re-assert on a slow tick.
+            // orderFrontRegardless does NOT activate the app or steal focus, so
+            // this is invisible unless it's actually needed.
+            #[cfg(target_os = "macos")]
+            {
+                let w = window.clone();
+                let h = app.handle().clone();
+                // Two msg_sends per tick, so this can be prompt without being
+                // wasteful. Fast enough that a re-appearance is animated while
+                // it still reads as an entrance.
+                std::thread::spawn(move || {
+                    let seen = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                    loop {
+                    std::thread::sleep(Duration::from_millis(400));
+                    let w2 = w.clone();
+                    let h2 = h.clone();
+                    let seen2 = seen.clone();
+                    let _ = w.run_on_main_thread(move || {
+                        if let Ok(ptr) = w2.ns_window() {
+                            use objc2::msg_send;
+                            use objc2::runtime::AnyObject;
+                            let ns_win = ptr as *mut AnyObject;
+                            unsafe {
+                                // IDEMPOTENT: only touch the window when it has
+                                // actually drifted. setLevel re-orders the
+                                // window, and re-ordering mid-drag aborts
+                                // AppKit's background-drag loop — so an
+                                // unconditional re-assert every 2s made the pill
+                                // impossible to move with the mouse.
+                                let want: usize = (1 << 0) | (1 << 6) | (1 << 8);
+                                let behavior: usize = msg_send![ns_win, collectionBehavior];
+                                if behavior != want {
+                                    let _: () = msg_send![ns_win, setCollectionBehavior: want];
+                                }
+                                let level: isize = msg_send![ns_win, level];
+                                if level != PILL_WINDOW_LEVEL {
+                                    let _: () = msg_send![ns_win, setLevel: PILL_WINDOW_LEVEL];
+                                    let _: () = msg_send![ns_win, orderFrontRegardless];
+                                }
+
+                                // Entrance animation trigger.
+                                //
+                                // A true Space-change hook is
+                                // NSWorkspaceActiveSpaceDidChangeNotification,
+                                // which needs a block or a custom observer
+                                // class. These two PUBLIC properties are what
+                                // can be read cheaply by polling instead:
+                                // occlusionState drops its visible bit while the
+                                // pill's Space is off-screen, and isOnActiveSpace
+                                // reports the same thing from the other side.
+                                // Either edge back to "on screen" is the moment
+                                // to play the entrance.
+                                let occl: usize = msg_send![ns_win, occlusionState];
+                                let on_active: bool = msg_send![ns_win, isOnActiveSpace];
+                                let visible = (occl & (1 << 1)) != 0 && on_active;
+                                let was = seen2.swap(visible, Ordering::SeqCst);
+                                if visible && !was {
+                                    let _ = h2.emit("pill-appear", ());
+                                }
+                            }
+                        }
+                    });
+                    }
                 });
             }
 
@@ -657,6 +2053,40 @@ pub fn run() {
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 ensure_registry(&st.active_project.lock().unwrap().clone());
+                // The announcement drainer runs regardless of whether the
+                // speech stack ever comes up: events still fire and the queue
+                // just holds until there is a voice to say them with.
+                announce::start_drainer(handle.clone(), st.clone());
+                watch::start(handle.clone(), st.clone());
+                hermes::start(handle.clone(), st.clone());
+
+                // Dev affordance: drive a full turn (LLM → tool → agent →
+                // announcement) without a microphone. The mic needs a signed
+                // bundle, so this is the only way to exercise the loop from a
+                // `tauri dev` run.
+                if let Ok(script) = std::env::var("VOX_DEBUG_SAY") {
+                    let (st2, h2) = (st.clone(), handle.clone());
+                    std::thread::spawn(move || {
+                        // "first turn || 30 || second turn" — the number is a
+                        // pause in seconds, so a launch can be followed by a
+                        // real follow-up question while the agent is still
+                        // running. One-shot couldn't test that at all.
+                        for part in script.split("||") {
+                            let part = part.trim();
+                            if part.is_empty() {
+                                continue;
+                            }
+                            if let Ok(secs) = part.parse::<u64>() {
+                                std::thread::sleep(Duration::from_secs(secs));
+                                continue;
+                            }
+                            std::thread::sleep(Duration::from_secs(3));
+                            println!("[vox] VOX_DEBUG_SAY: {part}");
+                            let _ = h2.emit("transcript", part);
+                            llm::ask_ollama(&h2, &st2, part);
+                        }
+                    });
+                }
                 daemons::init_paths(&st, &handle);
                 if setup::probe().get("needsSetup").and_then(|v| v.as_bool()).unwrap_or(false) {
                     // Speech stack not installed yet — hold the daemons and ask
@@ -666,12 +2096,19 @@ pub fn run() {
                 } else {
                     daemons::start_stt(&st);
                     daemons::start_tts(&st, handle.clone());
-                    println!("[vox] ready — Option+Space to activate, Cmd+, for settings");
+                    println!("[vox] ready — Option+Space to activate, Cmd+, (menu) for settings");
                 }
             });
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running vox");
+        .build(tauri::generate_context!())
+        .expect("error while building vox")
+        .run(move |app, event| match event {
+            // Dock icon clicked while the pill is hidden.
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => show_pill(app),
+            RunEvent::Exit => shutdown(app, &exit_state),
+            _ => {}
+        });
 }

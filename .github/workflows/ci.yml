@@ -3,26 +3,18 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main]
+    branches:
+      - main
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: read
 
 jobs:
-  build:
-    name: Build (macOS)
+  check:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install frontend dependencies
-        run: npm ci
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -34,14 +26,10 @@ jobs:
         with:
           workspaces: src-tauri
 
-      # The build passing is the check that matters for a PR.
-      - name: Build
+      - name: Clippy
         working-directory: src-tauri
-        run: cargo build
+        run: cargo clippy --all-targets -- -D warnings
 
-      # Clippy runs for visibility but doesn't block — Vox uses a deliberate,
-      # non-rustfmt house style, so lints are advisory, not gates.
-      - name: Clippy (advisory)
+      - name: Test
         working-directory: src-tauri
-        continue-on-error: true
-        run: cargo clippy --all-targets
+        run: cargo test

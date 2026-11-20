@@ -18,6 +18,18 @@ use tauri::{AppHandle, Emitter};
 use crate::{home, AppState};
 
 pub const VENV_DIR: &str = ".vox/venv";
+/// Qwen3-TTS gets its OWN virtualenv. The point is isolation: this is an engine
+/// under evaluation, and a failed experiment must not be able to disturb the
+/// Kokoro/Piper install it is being compared against. (mlx-audio also pins
+/// `transformers>=5.14` and `huggingface_hub>=1.0`, which pip would happily
+/// resolve underneath Kokoro.)
+pub const QWEN_VENV_DIR: &str = ".vox/venv-qwen";
+const QWEN_PIP_DEPS: &[&str] = &["mlx-audio>=0.4.7", "soundfile", "num2words"];
+pub const QWEN_MODEL_ID: &str = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit";
+
+pub fn qwen_python() -> PathBuf {
+    home().join(QWEN_VENV_DIR).join("bin/python")
+}
 const PIP_DEPS: &[&str] = &["openai-whisper", "numpy", "soundfile", "kokoro", "piper-tts", "num2words"];
 const PIPER_BASE: &str = "fr_FR-siwis-medium";
 const PIPER_URL: &str = "https://huggingface.co/rhasspy/piper-voices/resolve/main/fr/fr_FR/siwis/medium/fr_FR-siwis-medium.onnx";
@@ -39,27 +51,62 @@ fn comp(ok: bool, detail: impl Into<String>) -> Value {
 }
 
 /// Locate a system Python 3.11+ (needed to create the venv).
+/// Lowest supported Python for the speech stack.
+const PY_MIN: (u32, u32) = (3, 11);
+/// First version that BREAKS it. `kokoro` requires `<3.13`, and it pulls in
+/// spacy -> thinc -> blis, none of which publish wheels for 3.13+ — pip then
+/// tries to compile Cython and the whole install dies. Measured, not assumed.
+const PY_BREAKS_AT: (u32, u32) = (3, 13);
+
+fn py_version(p: &std::path::Path) -> Option<(u32, u32)> {
+    let out = Command::new(p)
+        .args(["-c", "import sys; v=sys.version_info; print('%d.%d' % (v[0], v[1]))"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut parts = s.trim().split('.');
+    Some((
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ))
+}
+
+/// A Python the speech stack can actually install into.
+///
+/// Two passes, and the order matters more than it looks. Searching newest-first
+/// picked 3.14 on a stock Homebrew Mac and the install failed outright; the
+/// known-good window is preferred instead, and a too-new interpreter is only
+/// used as a last resort, with a warning, so the user gets *something* rather
+/// than a hard stop.
 pub fn find_python() -> Option<PathBuf> {
-    for name in ["python3.13", "python3.12", "python3.11", "python3"] {
-        if let Some(p) = crate::daemons::find_bin(name, &[]) {
-            let out = Command::new(&p)
-                .args(["-c", "import sys; v=sys.version_info; print('%d.%d' % (v[0], v[1]))"])
-                .output()
-                .ok();
-            if let Some(out) = out {
-                if out.status.success() {
-                    let s = String::from_utf8_lossy(&out.stdout);
-                    let mut parts = s.trim().split('.');
-                    let (major, minor) = (
-                        parts.next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(0),
-                        parts.next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(0),
-                    );
-                    if major > 3 || (major == 3 && minor >= 11) {
-                        return Some(p);
-                    }
-                }
+    let names = ["python3.12", "python3.11", "python3.13", "python3.14", "python3"];
+    let mut fallback: Option<(PathBuf, (u32, u32))> = None;
+
+    for name in names {
+        for p in crate::daemons::find_bins(name, &[]) {
+            let Some(v) = py_version(&p) else { continue };
+            if v < PY_MIN {
+                continue;
+            }
+            if v < PY_BREAKS_AT {
+                return Some(p);
+            }
+            if fallback.is_none() {
+                fallback = Some((p, v));
             }
         }
+    }
+
+    if let Some((p, v)) = fallback {
+        eprintln!(
+            "[vox] only Python {}.{} found; the speech stack wants {}.{}-{}.{} \
+             and may fail to build",
+            v.0, v.1, PY_MIN.0, PY_MIN.1, PY_BREAKS_AT.0, PY_BREAKS_AT.1 - 1
+        );
+        return Some(p);
     }
     None
 }
@@ -97,10 +144,16 @@ pub fn probe() -> Value {
     let ffmpeg = crate::daemons::find_bin("ffmpeg", &[]).is_some();
     let espeak = crate::daemons::find_bin("espeak-ng", &[]).is_some();
     let ollama = crate::daemons::find_bin("ollama", &[]).is_some();
+    let qwen_py = qwen_python();
+    let qwen = is_executable(&qwen_py) && venv_has(&qwen_py, "mlx_audio");
+    let qwen_weights = h
+        .join(".vox/hf/hub")
+        .join(format!("models--{}", QWEN_MODEL_ID.replace('/', "--")))
+        .exists();
 
     json!({
         "components": {
-            "python": comp(py.is_some(), &py.map(|p| p.display().to_string()).unwrap_or_else(|| need("brew install python@3.11"))),
+            "python": comp(py.is_some(), py.map(|p| p.display().to_string()).unwrap_or_else(|| need("brew install python@3.11"))),
             "ffmpeg": comp(ffmpeg, if ffmpeg { need("ok") } else { need("brew install ffmpeg") }),
             "espeakNg": comp(espeak, if espeak { need("ok") } else { need("brew install espeak-ng") }),
             "ollama": comp(ollama, if ollama { need("ok") } else { need("brew install ollama") }),
@@ -109,8 +162,14 @@ pub fn probe() -> Value {
             "kokoro": comp(kokoro, need("kokoro")),
             "piper": comp(piper, need("piper-tts")),
             "piperVoice": comp(voice.exists(), voice.display().to_string()),
+            "qwen3": comp(qwen, if qwen { need("mlx-audio") } else { need("optionnel — moteur en test") }),
+            "qwen3Model": comp(qwen_weights, if qwen_weights { need("ok") } else { need("~1,7 Go") }),
         },
+        // Qwen deliberately does NOT gate this. Anything ANDed here becomes
+        // mandatory and re-triggers the installer at every launch; an optional
+        // engine under evaluation must never do that.
         "needsSetup": !(whisper && kokoro && piper),
+        "qwenReady": qwen && qwen_weights,
     })
 }
 
@@ -128,9 +187,15 @@ fn clean_line(line: &str) -> Option<String> {
     Some(s.chars().take(200).collect())
 }
 
+/// Progress goes to the setup panel AND to stdout.
+///
+/// It used to be renderer-only, which made first-run install the one flow in
+/// the app with no trace in the logs: if it failed — or never started — there
+/// was nothing to look at. That is exactly the flow a brand-new user hits.
 pub fn emit_log(app: &AppHandle, tag: &str, line: &str) {
     if let Some(s) = clean_line(line) {
-        let _ = app.emit("setup-log", json!({ "tag": tag, "line": s }));
+        println!("[setup:{tag}] {s}");
+    let _ = app.emit("setup-log", json!({ "tag": tag, "line": s }));
     }
 }
 
@@ -212,6 +277,7 @@ fn download(app: &AppHandle, url: &str, dest: &Path) -> Result<(), String> {
 /// French voice model. Idempotent — safe to re-run; missing pieces only.
 /// Streams progress to the renderer through `setup-log` events.
 pub fn run_setup(app: &AppHandle, _state: &Arc<AppState>) -> Result<Value, String> {
+    println!("[vox] run_setup invoked");
     let h = home();
     let vox = h.join(".vox");
     let venv = vox.join("venv");
@@ -223,7 +289,7 @@ pub fn run_setup(app: &AppHandle, _state: &Arc<AppState>) -> Result<Value, Strin
         emit_log(
             app,
             "setup",
-            "Python 3.11+ introuvable — installez-le puis relancez : brew install python@3.11",
+            "Python 3.12 introuvable — installe-le puis relance : brew install python@3.12",
         );
         "Python 3.11+ not found".to_string()
     })?;
@@ -307,4 +373,137 @@ pub fn run_setup(app: &AppHandle, _state: &Arc<AppState>) -> Result<Value, Strin
 
     emit_log(app, "setup", "Installation terminée ✓");
     Ok(probe())
+}
+
+// ── Optional engines ─────────────────────────────────────────────────────────
+
+/// Install Qwen3-TTS into its own virtualenv, then pull the weights.
+///
+/// Kept entirely separate from `run_setup`: this is opt-in, it must never gate
+/// launch, and it must not be able to disturb the working speech stack.
+pub fn install_qwen(app: &AppHandle) -> Result<Value, String> {
+    let venv = home().join(QWEN_VENV_DIR);
+    let venv_py = qwen_python();
+    emit_log(app, "qwen", "Installation du moteur Qwen3-TTS (environnement séparé)…");
+
+    let py = find_python().ok_or_else(|| {
+        "Python 3.11+ introuvable — installe-le (brew install python@3.11)".to_string()
+    })?;
+    if !is_executable(&venv_py) {
+        emit_log(app, "qwen", "Création de ~/.vox/venv-qwen…");
+        run_quiet(&py, &["-m", "venv", &venv.to_string_lossy()], "qwen", app)?;
+    }
+    run_quiet(
+        &venv_py,
+        &["-m", "pip", "install", "--upgrade", "pip", "--disable-pip-version-check",
+          "--no-input", "--progress-bar", "off"],
+        "qwen",
+        app,
+    )?;
+
+    emit_log(app, "qwen", "Installation de mlx-audio (quelques minutes)…");
+    let args: Vec<&str> = ["-m", "pip", "install", "--disable-pip-version-check",
+                           "--no-input", "--progress-bar", "off"]
+        .into_iter()
+        .chain(QWEN_PIP_DEPS.iter().copied())
+        .collect();
+    run_quiet(&venv_py, &args, "qwen", app)?;
+
+    // Loading the model IS the download — which also proves the checkpoint
+    // actually loads on this machine before it can ever be selected. Let
+    // huggingface_hub handle the sharded, resumable transfer; `download()`
+    // stays the right tool for the single-file Piper voice.
+    emit_log(app, "qwen", "Téléchargement du modèle Qwen3-TTS (~1,7 Go)…");
+    let mut child = Command::new(&venv_py)
+        .args([
+            "-c",
+            "import sys; from mlx_audio.tts.utils import load_model; \
+             load_model(sys.argv[1]); print('loaded', file=sys.stderr)",
+            QWEN_MODEL_ID,
+        ])
+        .env("HF_HOME", home().join(".vox/hf"))
+        .env("HF_HUB_DISABLE_TELEMETRY", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    stream_lines(&mut child, app, "qwen");
+    if !child.wait().map_err(|e| e.to_string())?.success() {
+        return Err("le téléchargement du modèle Qwen3-TTS a échoué".into());
+    }
+
+    emit_log(app, "qwen", "Qwen3-TTS prêt ✓");
+    Ok(probe())
+}
+
+// ── Speech-to-text engines ───────────────────────────────────────────────────
+
+/// (id, label, detail) for every STT engine `vox_stt.py` can run
+/// (`VOX_STT_MODEL`). Sizes are the on-disk download.
+pub const STT_MODELS: &[(&str, &str, &str)] = &[
+    ("whisper-small", "Whisper small", "rapide · ~0,5 Go"),
+    ("whisper-large-v3-turbo", "Whisper large-v3 turbo", "précis · ~1,5 Go"),
+    ("parakeet-v3", "Parakeet v3", "très rapide · ~2,3 Go"),
+];
+
+/// (python module, pip package, python snippet that loads/downloads the weights)
+fn stt_spec(id: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    match id {
+        "whisper-small" => Some(("whisper", "openai-whisper",
+            "import whisper; whisper.load_model('small'); print('loaded')")),
+        "whisper-large-v3-turbo" => Some(("mlx_whisper", "mlx-whisper",
+            "from huggingface_hub import snapshot_download as d; \
+             d('mlx-community/whisper-large-v3-turbo'); print('loaded')")),
+        "parakeet-v3" => Some(("parakeet_mlx", "parakeet-mlx",
+            "from parakeet_mlx import from_pretrained as f; \
+             f('mlx-community/parakeet-tdt-0.6b-v3'); print('loaded')")),
+        _ => None,
+    }
+}
+
+/// Is the engine's python package present in the shared venv? (Weights are
+/// fetched by `install_stt`; the daemon would also pull them on first load.)
+pub fn stt_installed(id: &str) -> bool {
+    let py = venv_python();
+    match stt_spec(id) {
+        Some((module, _, _)) => is_executable(&py) && venv_has(&py, module),
+        None => false,
+    }
+}
+
+/// Install an STT engine into the shared `~/.vox/venv` and pre-download its
+/// weights so the first dictation doesn't stall on a multi-GB transfer.
+pub fn install_stt(app: &AppHandle, id: &str) -> Result<Value, String> {
+    let (_, pkg, load_code) = stt_spec(id).ok_or_else(|| format!("modèle STT inconnu : {id}"))?;
+    let venv_py = venv_python();
+    if !is_executable(&venv_py) {
+        return Err("environnement Python Vox introuvable — lance d'abord l'installation".into());
+    }
+    emit_log(app, "stt", &format!("Installation du moteur {id}…"));
+    run_quiet(
+        &venv_py,
+        &["-m", "pip", "install", "--disable-pip-version-check", "--no-input",
+          "--progress-bar", "off", pkg],
+        "stt",
+        app,
+    )?;
+
+    // Loading the model IS the download — and proves it works on this machine.
+    // Same HF_HOME as the daemon so the cache is shared.
+    emit_log(app, "stt", "Téléchargement du modèle…");
+    let mut child = Command::new(&venv_py)
+        .args(["-c", load_code])
+        .env("HF_HOME", home().join(".vox/hf"))
+        .env("HF_HUB_DISABLE_TELEMETRY", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    stream_lines(&mut child, app, "stt");
+    if !child.wait().map_err(|e| e.to_string())?.success() {
+        return Err(format!("le téléchargement du modèle {id} a échoué"));
+    }
+
+    emit_log(app, "stt", &format!("{id} prêt ✓"));
+    Ok(json!({ "ok": true, "model": id }))
 }

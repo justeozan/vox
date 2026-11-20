@@ -16,3 +16,5 @@ scripts/icon-src.png
 .DS_Store
 *.swp
 test
+__pycache__/
+pnpm-lock.yaml

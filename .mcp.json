@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "conductor-cloud": {
+      "type": "http",
+      "url": "https://api.conductor.build/mcp"
+    }
+  }
+}

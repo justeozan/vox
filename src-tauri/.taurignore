@@ -1,0 +1,21 @@
+# NOTE: this file does NOT stop the dev-watcher rebuild loop — nothing can.
+#
+# Measured: the watcher reports "File src-tauri/<dir> changed" while that
+# directory's mtime is DAYS old and no file in the repo has been modified. The
+# events are spurious, and the reported directory just moves to whichever one is
+# still watched as you add ignore lines (resources -> src -> ...). An ignore
+# rule filters a path; it cannot filter an event about a file that never
+# changed. The fix is `tauri dev --no-watch` — `npm run dev`. See package.json.
+#
+# A real file change still names the FILE ("src-tauri/src/lib.rs changed"); the
+# spurious ones name the DIRECTORY. That is how to tell them apart.
+#
+# What remains below is genuine hygiene, and it matters for a second reason: a
+# custom .taurignore REPLACES Tauri's built-in list, so the defaults have to be
+# restated or `npm run dev:watch` loops on cargo's own output.
+target/
+gen/
+.git/
+resources/
+**/__pycache__/
+**/*.pyc
