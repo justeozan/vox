@@ -19,7 +19,7 @@ permissions:
 #   vars.R2_BUCKET.
 jobs:
   build-release:
-    runs-on: macos-14
+    runs-on: macos-latest
     env:
       # Read by `tauri build`: it imports the certificate into a temporary keychain, signs the
       # app (hardened runtime, src-tauri/Entitlements.plist) and the .dmg, then notarises and
