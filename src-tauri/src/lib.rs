@@ -16,6 +16,7 @@ pub mod dictation;
 pub mod dictation_text;
 pub mod hotkey;
 pub mod hermes;
+pub mod licence;
 pub mod llm;
 pub mod logfile;
 pub mod orca;
@@ -1011,6 +1012,9 @@ async fn voice_input(
     state: tauri::State<'_, Arc<AppState>>,
     wav: String,
 ) -> Result<(), String> {
+    if !licence::allowed() {
+        return Err("Evey licence required".into());
+    }
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         // NOTE: no interrupt reset here. Interruption is generation-based —
@@ -1378,7 +1382,7 @@ async fn check_update() -> Result<Value, String> {
                     "current": current,
                     "latest": latest,
                     "hasUpdate": version_gt(&latest, &current),
-                    "url": "https://github.com/justeozan/vox/releases/latest",
+                    "url": licence::download_url("https://github.com/justeozan/vox/releases/latest"),
                 })
             }
             // No releases yet / offline — report "up to date" rather than error.
@@ -1387,6 +1391,48 @@ async fn check_update() -> Result<Value, String> {
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn licence_status() -> Value {
+    licence::status()
+}
+
+#[tauri::command]
+async fn licence_activate(app: AppHandle, key: String) -> Result<Value, String> {
+    let res = tauri::async_runtime::spawn_blocking(move || licence::activate(&key))
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("licence-changed", licence::status());
+    res
+}
+
+/// Re-validate the stored key at launch, then every 12 h.
+fn spawn_licence_refresh(app: AppHandle) {
+    if !licence::ENFORCED {
+        return;
+    }
+    std::thread::spawn(move || loop {
+        licence::refresh();
+        let _ = app.emit("licence-changed", licence::status());
+        std::thread::sleep(licence::REFRESH_EVERY);
+    });
+}
+
+/// `vox://activate?key=...` stores the key and activates it.
+fn handle_activation_urls(app: &AppHandle, urls: Vec<tauri::Url>) {
+    for url in urls {
+        if url.scheme() != "vox" || url.host_str() != Some("activate") {
+            continue;
+        }
+        if let Some((_, key)) = url.query_pairs().find(|(k, _)| k == "key") {
+            let (app, key) = (app.clone(), key.to_string());
+            std::thread::spawn(move || {
+                let _ = licence::activate(&key);
+                let _ = app.emit("licence-changed", licence::status());
+            });
+        }
+    }
 }
 
 /// Open a URL in the default browser (release download page).
@@ -1607,6 +1653,7 @@ pub fn run() {
     let exit_state = state.clone();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, shortcut, event| {
@@ -1670,9 +1717,21 @@ pub fn run() {
             get_version,
             check_update,
             open_url,
+            licence_status,
+            licence_activate,
         ])
         .setup(move |app| {
             println!("[vox] starting pid={}", std::process::id());
+
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |ev| handle_activation_urls(&handle, ev.urls()));
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    handle_activation_urls(app.handle(), urls);
+                }
+                spawn_licence_refresh(app.handle().clone());
+            }
 
             // Prompt for microphone access up front so the webview mic isn't a
             // silent stream (see request_microphone_access).
