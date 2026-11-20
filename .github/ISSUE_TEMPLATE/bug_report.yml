@@ -1,0 +1,46 @@
+name: Bug report
+description: Something in Vox isn't working
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to file a bug. Please fill in what you can.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: I said "…", expected …, but Vox …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: >
+        Lines from the app's stdout (they start with `[vox]`). If you ran the
+        bundle, launch it from a terminal to see them, or run `scripts/dev-bundle.sh`.
+      render: shell
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "14.5 (Apple Silicon)"
+    validations:
+      required: true
+  - type: dropdown
+    id: env
+    attributes:
+      label: What's running?
+      multiple: true
+      options:
+        - Ollama is running with a model pulled
+        - Conductor is running
+        - Claude Code CLI is installed
+        - Installed from a release .dmg
+        - Built from source
+  - type: input
+    id: version
+    attributes:
+      label: Vox version
+      description: From the settings panel (Cmd+,), or the git commit if built from source.

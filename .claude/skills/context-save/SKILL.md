@@ -1,1 +1,0 @@
-/Users/spectre/conductor/repos/vox/.claude/skills/gstack/context-save/SKILL.md

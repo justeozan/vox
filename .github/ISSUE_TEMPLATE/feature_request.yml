@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest an idea for Vox
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: What are you trying to do that Vox makes hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like Vox to do?
+    validations:
+      required: true
+  - type: checkboxes
+    id: local-first
+    attributes:
+      label: Local-first
+      description: Vox makes no cloud calls and stores no API keys. Ideas must keep that property.
+      options:
+        - label: This works fully offline / on-device (no cloud calls, no API keys)
+          required: true
