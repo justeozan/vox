@@ -261,10 +261,6 @@ fn process(app: &AppHandle, state: &Arc<AppState>, samples: &[f32]) {
     let fr = state.settings.lock().unwrap().language.starts_with("fr");
     let msg = |en: &str, fr_msg: &str| if fr { fr_msg.to_string() } else { en.to_string() };
 
-    if !crate::licence::allowed() {
-        return done(app, false, "", Some(msg("Evey licence required.", "Licence Evey requise.")));
-    }
-
     let min = (crate::capture::OUT_RATE as f64 * MIN_AUDIO.as_secs_f64()) as usize;
     if samples.len() < min {
         return done(app, false, "", Some(msg("Too short — nothing to type.", "Trop court, rien à écrire.")));

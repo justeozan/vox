@@ -1,11 +1,9 @@
 //! Evey licence client.
 //!
-//! The source stays open, but the signed binaries and their updates are for live
-//! subscribers (see `LICENSE_CONTRACT`). With the `licence` cargo feature (always on in
-//! the release workflow) the app shows a lock screen until it holds a valid licence: an
-//! Ed25519-signed token issued by `https://evey.run/api/license` for this app and this
-//! device, valid 14 days. Without the feature (local and source builds) the check is
-//! skipped. Anyone building from source can remove it; that is accepted.
+//! Vox is open source and fully usable without a licence. An Evey key can be entered in
+//! Settings; it is exchanged for an Ed25519-signed token issued by
+//! `https://evey.run/api/license` for this app and this device (valid 14 days). What a
+//! valid licence unlocks is decided later — nothing is gated on it today.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -23,9 +21,6 @@ const ENDPOINT: &str = "https://evey.run/api/license";
 const PUBLIC_KEY_B64: &str = "XGHjkcgCJpOG4qOxuqp1OZ758ZYjf7/LJ1xciviWcCk=";
 /// How often a running app re-validates its key.
 pub const REFRESH_EVERY: Duration = Duration::from_secs(12 * 3600);
-
-/// True when this build enforces the licence (`--features licence`).
-pub const ENFORCED: bool = cfg!(feature = "licence");
 
 #[derive(Debug, Deserialize)]
 pub struct Claims {
@@ -153,11 +148,8 @@ pub fn stored_key() -> Option<String> {
 /// Set when the server last said the subscription has ended.
 static INACTIVE: Mutex<bool> = Mutex::new(false);
 
-/// Current state for the front-end: `valid`, `locked` or `inactive`.
+/// Current state for the front-end: `none` (no key), `valid`, `invalid` or `inactive`.
 pub fn status() -> Value {
-    if !ENFORCED {
-        return json!({ "enforced": false, "state": "valid" });
-    }
     let s = load();
     let valid = match (&s.licence, &s.device, embedded_key()) {
         (Some(l), Some(d), Some(k)) => verify(l, &k, APP, d, now()).is_ok(),
@@ -168,15 +160,26 @@ pub fn status() -> Value {
         "valid"
     } else if inactive {
         "inactive"
+    } else if s.key.is_none() {
+        "none"
     } else {
-        "locked"
+        "invalid"
     };
-    json!({ "enforced": true, "state": state, "hasKey": s.key.is_some() })
+    json!({ "state": state, "hasKey": s.key.is_some() })
 }
 
-/// True when the app may do its job.
-pub fn allowed() -> bool {
+/// True when a valid licence is held (for features unlocked later).
+pub fn is_valid() -> bool {
     status()["state"] == "valid"
+}
+
+/// Forget the stored key and licence (the device id is kept).
+pub fn clear() {
+    let mut s = load();
+    s.key = None;
+    s.licence = None;
+    save(&s);
+    *INACTIVE.lock().unwrap_or_else(|e| e.into_inner()) = false;
 }
 
 enum Outcome {

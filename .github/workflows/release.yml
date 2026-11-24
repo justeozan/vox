@@ -62,8 +62,7 @@ jobs:
           echo "APPLE_API_KEY_PATH=${key}" >> "${GITHUB_ENV}"
 
       - name: Build Vox (app + dmg)
-        # --features licence: official binaries enforce the Evey licence (see README).
-        run: npm run tauri build -- --bundles app,dmg --features licence
+        run: npm run tauri build -- --bundles app,dmg
 
       # Tauri notarises the app inside; notarising the .dmg too lets Gatekeeper accept the
       # download itself, offline included.

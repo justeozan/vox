@@ -1,6 +1,6 @@
 [package]
 name = "vox"
-version = "0.5.0"
+version = "0.6.0"
 description = "Voice AI orchestration bar"
 edition = "2021"
 
@@ -24,11 +24,6 @@ libc = "0.2"
 cpal = "0.15"
 ed25519-dalek = "2"
 tauri-plugin-deep-link = "2"
-
-[features]
-# Enforce the Evey licence (lock screen without a valid one). Enabled by the release
-# workflow; local and source builds skip it.
-licence = []
 
 [target."cfg(target_os = \"macos\")".dependencies]
 objc2 = "0.6"
