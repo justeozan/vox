@@ -1012,9 +1012,6 @@ async fn voice_input(
     state: tauri::State<'_, Arc<AppState>>,
     wav: String,
 ) -> Result<(), String> {
-    if !licence::allowed() {
-        return Err("Evey licence required".into());
-    }
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         // NOTE: no interrupt reset here. Interruption is generation-based —
@@ -1407,11 +1404,16 @@ async fn licence_activate(app: AppHandle, key: String) -> Result<Value, String> 
     res
 }
 
+#[tauri::command]
+fn licence_clear(app: AppHandle) -> Value {
+    licence::clear();
+    let st = licence::status();
+    let _ = app.emit("licence-changed", st.clone());
+    st
+}
+
 /// Re-validate the stored key at launch, then every 12 h.
 fn spawn_licence_refresh(app: AppHandle) {
-    if !licence::ENFORCED {
-        return;
-    }
     std::thread::spawn(move || loop {
         licence::refresh();
         let _ = app.emit("licence-changed", licence::status());
@@ -1719,6 +1721,7 @@ pub fn run() {
             open_url,
             licence_status,
             licence_activate,
+            licence_clear,
         ])
         .setup(move |app| {
             println!("[vox] starting pid={}", std::process::id());

@@ -153,16 +153,12 @@ Vox is a [Tauri 2](https://v2.tauri.app) app: a Rust backend (`src-tauri/`) driv
 - **Conductor state** (`backend: conductor`) — read-only, via the system `sqlite3` CLI against Conductor's own database (`~/Library/Application Support/com.conductor.app/conductor.db`). Vox never writes to it.
 - **Conductor agents** — voice-launched tasks run as `claude --print --dangerously-skip-permissions "<task>"` in the target worktree (the active project, or any worktree resolved by name from Conductor's database; Orca agents are launched as above), with a 10-minute default timeout (`VOX_AGENT_TIMEOUT`) and a live agent-count badge on the pill. Because nobody can approve prompts in `--print` mode, agents get a hard deny list (`--disallowedTools`) covering `git push`, `git reset --hard`, `git clean`, `git branch -D`, `rm -rf`, `sudo`, `gh pr merge`, `gh release`, `npm publish` and `cargo publish`.
 
-## Licence: open source, paid binaries
+## Evey licence (optional)
 
-The code is open source (see [License](#license)). The signed, notarised binaries and their
-updates, however, are for [Evey](https://evey.run) subscribers: the official build asks for
-your Evey key on first launch (or via the one-click `vox://activate?key=...` button on your
-access page), checks it online every 12 hours and keeps working offline for up to 14 days.
-
-This is enforced by the `licence` cargo feature, which the release workflow turns on. A build
-from source does not enable it, so it runs without a key. Nothing stops you from building
-Vox yourself; the subscription pays for the maintained, signed and updated binary.
+Vox is open source and fully usable without a key — nothing is locked. If you have an
+[Evey](https://evey.run) subscription, paste your key in **Settings → Application → Evey
+licence** (or click `vox://activate?key=...` on your access page). It is checked online every
+12 hours and stays valid offline for 14 days. What it unlocks will come later.
 
 ## Building from source
 

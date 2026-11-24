@@ -28,14 +28,6 @@ npm run tauri dev     # hot-reload dev build
 npm run tauri build   # release .app bundle
 ```
 
-### Licence in dev
-
-Official release builds enforce the Evey licence through the `licence` cargo feature
-(`npm run tauri build -- --features licence`, set in `.github/workflows/release.yml`).
-Without the feature (`npm run dev`, plain `cargo build`) the check is skipped, so you never
-need a key to contribute. Do not enable the feature by default or remove it from the release
-workflow. To exercise the lock screen locally, run with `--features licence`.
-
 ### ⚠️ The microphone in dev
 
 `tauri dev` runs a bare binary parented to your terminal. macOS refuses to vend
