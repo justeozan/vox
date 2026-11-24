@@ -35,6 +35,11 @@
       }
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": { "schemes": ["vox"] }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": [

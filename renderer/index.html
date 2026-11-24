@@ -978,8 +978,26 @@
     padding-bottom: 2px;
   }
 </style>
+<style>
+#licence-lock{position:fixed;inset:0;z-index:99999;display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:32px;text-align:center;background:rgba(18,18,22,.96);color:#eee;font:13px -apple-system,system-ui,sans-serif;border-radius:inherit}
+#licence-lock.show{display:flex}
+#licence-lock h2{margin:0;font-size:16px}
+#licence-lock p{margin:0;opacity:.7;max-width:360px}
+#licence-lock input{width:100%;max-width:360px;padding:8px 10px;border-radius:8px;border:1px solid #444;background:#111;color:#eee;font:12px ui-monospace,monospace}
+#licence-lock button{padding:8px 18px;border-radius:8px;border:0;background:#7c5cff;color:#fff;font-size:13px;cursor:pointer}
+#licence-lock button:disabled{opacity:.5}
+#licence-lock .err{color:#ff8a8a;opacity:1}
+#licence-lock a{color:#9db4ff;cursor:pointer;text-decoration:underline}
+</style>
 </head>
 <body>
+<div id="licence-lock" data-tauri-drag-region>
+  <h2>Vox needs an Evey licence</h2>
+  <p id="licence-msg">Paste your Evey key to unlock Vox.</p>
+  <input id="licence-key" placeholder="sub_...." autocomplete="off" spellcheck="false">
+  <button id="licence-go">Activate</button>
+  <p><a data-url="https://evey.run/#pricing">Get Evey</a> &middot; <a data-url="https://evey.run/access">Lost your key?</a></p>
+</div>
 <div class="shell" data-tauri-drag-region>
   <div class="boot-sweep"></div>
   <div class="drop-glyph" aria-hidden="true"><span></span><span></span><span></span></div>
@@ -1210,6 +1228,42 @@
 const { invoke } = window.__TAURI__.core
 const { listen } = window.__TAURI__.event
 const { convertFileSrc } = window.__TAURI__.core
+
+// ── Evey licence lock screen ──────────────────────────────────────────────────
+;(function () {
+  const lock = document.getElementById('licence-lock')
+  const msg = document.getElementById('licence-msg')
+  const input = document.getElementById('licence-key')
+  const go = document.getElementById('licence-go')
+  const DEFAULT = 'Paste your Evey key to unlock Vox.'
+  function apply(st) {
+    const locked = !!(st && st.enforced && st.state !== 'valid')
+    lock.classList.toggle('show', locked)
+    if (locked && st.state === 'inactive') {
+      msg.textContent = 'Your subscription has ended. Renew it to keep using Vox.'
+      msg.classList.add('err')
+    } else if (!locked || !msg.classList.contains('err')) {
+      msg.textContent = DEFAULT
+      msg.classList.remove('err')
+    }
+  }
+  for (const a of lock.querySelectorAll('a[data-url]')) {
+    a.addEventListener('click', () => invoke('open_url', { url: a.dataset.url }))
+  }
+  go.addEventListener('click', async () => {
+    go.disabled = true
+    try {
+      apply(await invoke('licence_activate', { key: input.value }))
+      input.value = ''
+    } catch (e) {
+      msg.textContent = String(e)
+      msg.classList.add('err')
+    }
+    go.disabled = false
+  })
+  listen('licence-changed', ev => apply(ev.payload))
+  invoke('licence_status').then(apply).catch(() => {})
+})()
 
 // ── VAD config ────────────────────────────────────────────────────────────────
 const SPEECH_THRESHOLD   = 0.015
