@@ -3,6 +3,13 @@
 ## Unreleased
 
 ### Added
+- **Settings in their own window (⌘,).** The pill is now a small 240×40 bar with no
+  gear and no settings panel; the recap button appears on hover. ⌘, (app menu)
+  and the tray's *Settings…* open a separate window (singleton, Esc / ⌘W close
+  it) with Dictation, Voice, Brain, Agents and About tabs. Changes reach the pill
+  live through a `settings-changed` event. Tokens, labels and the Tauri bridge
+  are shared (`renderer/shared.css`, `renderer/shared.js`); the settings schema
+  is unchanged.
 - **Dictation (⌥⇧Space), ported from Amical.** Hold to talk, release, and the
   cleaned-up text is pasted at the cursor of the frontmost app; a tap latches
   hands-free, Esc cancels. At key press Vox reads the frontmost app and up to
