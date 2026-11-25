@@ -36,11 +36,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindow, WindowEvent};
+use tauri::{
+    AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    WindowEvent,
+};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-pub const BAR_W: f64 = 408.0;
-pub const BAR_H: f64 = 56.0;
+pub const BAR_W: f64 = 240.0;
+pub const BAR_H: f64 = 40.0;
 const PILL_RADIUS: f64 = 28.0;
 /// NSPopUpMenuWindowLevel. See the setLevel call in `setup` for why not 25.
 #[cfg(target_os = "macos")]
@@ -989,6 +992,7 @@ async fn set_settings(
         }
         let s = st.settings.lock().unwrap().clone();
         let mut out = serde_json::to_value(&s).unwrap_or_else(|_| json!({}));
+        let _ = app.emit(SETTINGS_CHANGED_EVENT, &out);
         out["restarted"] = json!(restart || stt_changed);
         Ok(out)
     })
@@ -1470,10 +1474,55 @@ pub fn load_pronunciations() -> Vec<(String, String)> {
 
 // ── Mac-app chrome: menu bar, tray, show/hide ────────────────────────────────
 
-/// What ⌘, used to do as a global shortcut. Now driven by the app menu and the
-/// tray, so it no longer steals Preferences from every other app.
-fn toggle_settings(app: &AppHandle) {
-    let _ = app.emit("toggle-settings", ());
+/// Label and page of the Settings window (a second page next to the pill).
+const SETTINGS_LABEL: &str = "settings";
+const SETTINGS_PAGE: &str = "settings.html";
+/// Event the pill listens to for live settings updates (no polling).
+const SETTINGS_CHANGED_EVENT: &str = "settings-changed";
+
+/// Open the Settings window, or focus it when it already exists (singleton).
+/// ⌘, comes from the app menu and the tray, so it no longer steals Preferences
+/// from every other app. The window is regular and focusable, never on top.
+fn open_settings_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(SETTINGS_LABEL) {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return;
+    }
+    let built =
+        WebviewWindowBuilder::new(app, SETTINGS_LABEL, WebviewUrl::App(SETTINGS_PAGE.into()))
+            .title("Vox")
+            .inner_size(720.0, 540.0)
+            .resizable(false)
+            .decorations(true)
+            .always_on_top(false)
+            .focused(true)
+            .build();
+    match built {
+        Ok(w) => {
+            let _ = w.set_focus();
+        }
+        Err(e) => eprintln!("[vox] settings window failed: {e}"),
+    }
+}
+
+/// ⌘W: close the Settings window when it has focus, otherwise hide the pill.
+fn close_front_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(SETTINGS_LABEL) {
+        if w.is_focused().unwrap_or(false) {
+            let _ = w.close();
+            return;
+        }
+    }
+    hide_pill(app);
+}
+
+/// Settings → pill: ask the pill to run the setup flow again.
+#[tauri::command]
+fn rerun_setup(app: AppHandle) {
+    show_pill(&app);
+    let _ = app.emit("setup-open", ());
 }
 
 /// Bring the pill back. `pill-shown` replays the entrance animation, which only
@@ -1569,12 +1618,8 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
 fn on_menu_event(app: &AppHandle, id: &str) {
     match id {
-        "settings" => {
-            // Settings render inside the pill, so it has to be on screen.
-            show_pill(app);
-            toggle_settings(app);
-        }
-        "close-pill" => hide_pill(app),
+        "settings" => open_settings_window(app),
+        "close-pill" => close_front_window(app),
         "show-pill" => show_pill(app),
         "tray-toggle" => toggle_pill(app),
         "tray-quit" => app.exit(0),
@@ -1706,6 +1751,7 @@ pub fn run() {
             set_vocabulary,
             audio_done,
             set_pill_frame,
+            rerun_setup,
             glass_info,
             interrupt,
             ui_state,
@@ -2158,7 +2204,7 @@ pub fn run() {
                 } else {
                     daemons::start_stt(&st);
                     daemons::start_tts(&st, handle.clone());
-                    println!("[vox] ready — Option+Space to activate, Cmd+, (menu) for settings");
+                    println!("[vox] ready — Option+Space to activate, Cmd+, (menu) opens the Settings window");
                 }
             });
 
@@ -2173,4 +2219,64 @@ pub fn run() {
             RunEvent::Exit => shutdown(app, &exit_state),
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_window_is_a_distinct_page() {
+        assert_ne!(SETTINGS_LABEL, "main");
+        assert!(std::path::Path::new("../renderer")
+            .join(SETTINGS_PAGE)
+            .exists());
+    }
+
+    #[test]
+    fn capability_covers_the_settings_window() {
+        let cap = include_str!("../capabilities/default.json");
+        assert!(cap.contains(&format!("\"{SETTINGS_LABEL}\"")));
+    }
+
+    #[test]
+    fn bar_no_longer_hosts_settings() {
+        let bar = include_str!("../../renderer/index.html");
+        for gone in [
+            "id=\"gear\"",
+            "id=\"settings\"",
+            "settings-open",
+            "SIZE_SETTINGS",
+            "toggle-settings",
+        ] {
+            assert!(!bar.contains(gone), "bar still contains {gone}");
+        }
+        assert!(bar.contains(SETTINGS_CHANGED_EVENT));
+    }
+
+    #[test]
+    fn settings_page_has_every_group_and_i18n_key() {
+        let page = include_str!("../../renderer/settings.html");
+        let shared = include_str!("../../renderer/shared.js");
+        for tab in ["dictation", "voice", "brain", "agents", "about"] {
+            assert!(
+                page.contains(&format!("data-tab=\"{tab}\"")),
+                "missing tab {tab}"
+            );
+        }
+        // Every L.<key> used by the page exists in both languages.
+        let fr = shared.find("  fr: {").unwrap();
+        let en = shared.find("  en: {").unwrap();
+        let (fr_t, en_t) = (&shared[fr..en], &shared[en..]);
+        let mut rest = page;
+        while let Some(i) = rest.find("L.") {
+            rest = &rest[i + 2..];
+            let key: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
+            if key.is_empty() {
+                continue;
+            }
+            assert!(fr_t.contains(&format!("{key}:")), "FR missing {key}");
+            assert!(en_t.contains(&format!("{key}:")), "EN missing {key}");
+        }
+    }
 }

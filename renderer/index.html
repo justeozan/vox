@@ -2,17 +2,10 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
+<link rel="stylesheet" href="shared.css">
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
 
   :root {
-    --green:  #4ade80;
-    --amber:  #f59e0b;
-    --blue:   #60a5fa;
-    --violet: #a78bfa;
-    --boot:   #c4b5fd;
-    --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-    --smooth: cubic-bezier(0.22, 1, 0.36, 1);
     /* One curve for every size change and reveal, so the pill's growth, the
        panel fade and the bar's hover glide read as a single gesture. Gentle
        start, long soft landing (Apple-style). */
@@ -20,12 +13,11 @@
     /* Pill size + the duration of the change in flight. syncWindow() rewrites
        these on .shell; the same numbers go to Rust (set_pill_frame) so the
        native blur tracks the CSS exactly. 0ms until first paint is done. */
-    --pill-w: 408px;
-    --pill-h: 56px;
+    --pill-w: 240px;
+    --pill-h: 40px;
     --pill-dur: 0ms;
     /* Pill tint alpha. applyTransparency() rewrites it from the Transparency
        setting; the native Liquid Glass / blur behind does the rest. */
-    --tint-a: 0.46;
   }
 
   /* The window is a fixed transparent envelope; only .shell paints. */
@@ -56,7 +48,7 @@
        padding pushed the bar ~20px down near the end of a shrink, and it
        snapped back up when the panel was hidden. */
     --panel-w: calc(var(--pill-w) - 2px);   /* minus border */
-    --panel-h: calc(var(--pill-h) - 58px);  /* minus bar 56 + border 2 */
+    --panel-h: calc(var(--pill-h) - 42px);  /* minus bar 40 + border 2 */
     justify-content: flex-end;
     position: absolute;
     left: 0;
@@ -243,7 +235,6 @@
     display: flex;
     animation: settingsIn 0.3s var(--smooth) forwards;
   }
-  body.settings-open .carousel { display: none; } /* settings wins */
 
   /* Closing phase: the body class is already gone but the panel stays up while
      it fades and the pill shrinks around it, otherwise the content vanishes
@@ -251,7 +242,7 @@
      ends. Declared after the open rules; the "wins over" rules below still
      beat it (higher specificity), so a panel can't linger beside its
      replacement. */
-  .carousel.closing, .settings.closing, .setup.closing {
+  .carousel.closing, .setup.closing {
     display: flex;
     pointer-events: none;
     animation: panelOut 0.16s var(--pill-ease) forwards;
@@ -302,308 +293,15 @@
     flex-shrink: 0;
   }
 
-  /* ── Settings panel (above the bar; the bar stays put at the bottom) ────
-     The pill grows UPWARD (bottom edge pinned), so the panel content is
-     bottom-anchored (justify-content:flex-end) to sit still against the bar
-     while the pill expands — it is revealed like a sheet rather than every
-     row sliding as it grows. The whole panel cross-fades in once (and out
-     again via .closing); no per-row motion. */
-  .settings {
-    display: none;
-    flex-direction: column;
-    justify-content: flex-end;
-    padding: 16px 22px 34px 22px;   /* bottom: room for .panel-actions */
-    flex: 0 0 auto;
-    align-self: center;
-    width: var(--panel-w);
-    height: var(--panel-h);
-    overflow: hidden;
-  }
-  body.settings-open .settings {
-    display: flex;
-    animation: settingsIn 0.3s var(--smooth) forwards;
-  }
-  @keyframes settingsIn { from { opacity: 0; } to { opacity: 1; } }
-
-  .settings-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 10px;
-  }
-
-  .settings-title {
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-    color: rgba(255,255,255,0.5);
-  }
-  .settings-hint { font-size: 10px; color: rgba(255,255,255,0.28); }
-  .settings-hint kbd {
-    font-family: inherit;
-    font-size: 10px;
-    padding: 1px 5px;
-    border-radius: 4px;
-    background: rgba(255,255,255,0.07);
-    border: 1px solid rgba(255,255,255,0.09);
-    margin: 0 1px;
-  }
-
-  .segment button { white-space: nowrap; }
-
-  /* Provider + model share a row: the model list only means anything relative
-     to the provider, so they read as one control. min-width:0 lets both shrink
-     instead of overflowing the 500px panel. */
-  .setting-pair {
-    display: flex;
-    gap: 7px;
-    flex: 1;
-    min-width: 0;
-    justify-content: flex-end;
-  }
-  .setting-pair .setting-select {
-    min-width: 0;
-    flex: 1 1 0;
-    max-width: 190px;
-  }
-
-  .setting-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 0;
-    border-top: 1px solid rgba(255,255,255,0.05);
-    min-height: 40px;
-  }
-
-  .setting-label { font-size: 12.5px; color: rgba(255,255,255,0.78); }
-  .setting-value { font-size: 12px; color: rgba(255,255,255,0.5); font-variant-numeric: tabular-nums; }
-
-  .setting-tag {
-    margin-left: 7px;
-    font-size: 9.5px;
-    letter-spacing: 0.06em;
-    color: rgba(255,255,255,0.32);
-  }
-  .range-wrap { display: flex; align-items: center; gap: 12px; }
-  .range-value { min-width: 36px; text-align: right; }
-  input[type="range"]#glass-range {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 150px;
-    height: 12px;
-    background: transparent;
-    outline: none;
-    cursor: pointer;
-    --fill: 40%;
-  }
-  #glass-range::-webkit-slider-runnable-track {
-    height: 3px;
-    border-radius: 2px;
-    background: linear-gradient(to right, rgba(255,255,255,0.6) var(--fill), rgba(255,255,255,0.14) var(--fill));
-  }
-  #glass-range::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 12px;
-    height: 12px;
-    margin-top: -4.5px;  /* centre on the 3px track */
-    border-radius: 50%;
-    background: #fff;
-    border: none;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.4);
-    transition: transform 0.15s var(--spring);
-  }
-  #glass-range:active::-webkit-slider-thumb { transform: scale(1.15); }
-
-  /* Update row: version + check/download button */
-  .update-btn {
-    -webkit-appearance: none;
-    appearance: none;
-    background: rgba(167,139,250,0.16);
-    border: 1px solid rgba(167,139,250,0.35);
-    color: #d9ceff;
-    font-size: 11px;
-    font-family: inherit;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    padding: 6px 14px;
-    border-radius: 9px;
-    cursor: pointer;
-    transition: background 0.2s, border-color 0.2s, transform 0.15s var(--spring);
-  }
-  .update-btn:hover { background: rgba(167,139,250,0.26); border-color: rgba(167,139,250,0.55); }
-  .update-btn:active { transform: scale(0.95); }
-  .update-btn:disabled { opacity: 0.5; cursor: default; }
-  .update-btn.ok { background: rgba(74,222,128,0.14); border-color: rgba(74,222,128,0.4); color: #b6f2cd; }
-
-  .licence-ctl { display: flex; gap: 6px; align-items: center; flex: 1; min-width: 0; justify-content: flex-end; }
-  input.setting-input {
-    background: rgba(255,255,255,0.05);
-    border: 1px solid rgba(255,255,255,0.10);
-    color: #fff; font-size: 12px; padding: 6px 10px; border-radius: 9px; outline: none;
-    font-family: ui-monospace, monospace; width: 100%; max-width: 220px; min-width: 0;
-    transition: border-color 0.2s, background-color 0.2s;
-  }
-  input.setting-input:focus { border-color: rgba(167,139,250,0.6); }
-  .setting-hint.err { color: #ff8a8a; }
-  .setting-hint.ok { color: #b6f2cd; }
-
-  select.setting-select {
-    -webkit-appearance: none;
-    appearance: none;
-    background: rgba(255,255,255,0.05);
-    border: 1px solid rgba(255,255,255,0.10);
-    color: #fff;
-    font-size: 12px;
-    padding: 6px 28px 6px 12px;
-    border-radius: 9px;
-    outline: none;
-    font-family: inherit;
-    cursor: pointer;
-    max-width: 220px;
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='rgba(255,255,255,0.5)' d='M0 0l5 6 5-6z'/></svg>");
-    background-repeat: no-repeat;
-    background-position: right 9px center;
-    transition: border-color 0.2s, background-color 0.2s, transform 0.15s var(--spring);
-  }
-  select.setting-select:hover { border-color: rgba(255,255,255,0.2); background-color: rgba(255,255,255,0.08); }
-  select.setting-select:focus { border-color: rgba(167,139,250,0.6); }
-  select.setting-select:active { transform: scale(0.97); }
-
-  /* Dictation rows: a hint under the label, and the vocabulary editor. */
-  .setting-label-col { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-  .setting-hint { font-size: 10.5px; color: rgba(255,255,255,0.38); }
-  .setting-row.vocab { flex-direction: column; align-items: stretch; gap: 6px; }
-  .vocab-cols { display: flex; gap: 8px; }
-  .vocab-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-  .vocab-col .setting-hint { text-transform: uppercase; letter-spacing: 0.08em; font-size: 9.5px; }
-  textarea.vocab-area {
-    -webkit-appearance: none;
-    appearance: none;
-    resize: none;
-    height: 58px;
-    background: rgba(255,255,255,0.05);
-    border: 1px solid rgba(255,255,255,0.10);
-    color: #fff;
-    font-size: 11.5px;
-    line-height: 1.4;
-    font-family: inherit;
-    padding: 6px 9px;
-    border-radius: 9px;
-    outline: none;
-    transition: border-color 0.2s, background-color 0.2s;
-  }
-  textarea.vocab-area:focus { border-color: rgba(244,114,182,0.55); }
-
-  /* Settings v2: grouped, scrollable body, per-row reset. */
-  .settings-body {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding-right: 2px;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255,255,255,0.12) transparent;
-  }
-  .setting-group { margin-bottom: 12px; }
-  .group-title {
-    font-size: 9.5px;
-    font-weight: 700;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: rgba(167,139,250,0.7);
-    padding: 2px 0 2px;
-  }
-  .row-ctl { display: flex; align-items: center; gap: 6px; flex-shrink: 0; min-width: 0; }
-  .reset-btn {
-    -webkit-appearance: none;
-    appearance: none;
-    background: transparent;
-    border: none;
-    color: rgba(255,255,255,0.45);
-    font-family: inherit;
-    font-size: 13px;
-    line-height: 1;
-    width: 20px;
-    height: 20px;
-    border-radius: 6px;
-    cursor: pointer;
-    visibility: hidden;
-    flex-shrink: 0;
-    transition: color 0.2s, background 0.2s;
-  }
-  .reset-btn.show { visibility: visible; }
-  .reset-btn:hover { color: #d9ceff; background: rgba(167,139,250,0.16); }
-  .setting-row.vocab .vocab-head {
-    display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none;
-  }
-  .vocab-head .setting-label { flex: 1; }
-  .vocab-chev { font-size: 9px; color: rgba(255,255,255,0.4); width: 10px; transition: transform 0.2s; }
-  .setting-row.vocab.open .vocab-chev { transform: rotate(90deg); }
-  .setting-warn {
-    display: flex; align-items: center; justify-content: space-between; gap: 10px;
-    margin: 6px 0 4px;
-    padding: 8px 10px;
-    border-radius: 9px;
-    font-size: 11px;
-    line-height: 1.4;
-    color: rgba(255,226,170,0.9);
-    background: rgba(245,158,11,0.09);
-    border: 1px solid rgba(245,158,11,0.28);
-  }
-  .setting-warn .update-btn { flex-shrink: 0; padding: 5px 10px; }
-  .setting-hint.err { color: #f87171; }
-  .setting-hint.busy { color: rgba(245,158,11,0.8); }
-  .reset-all-wrap { text-align: center; padding: 8px 0 6px; border-top: 1px solid rgba(255,255,255,0.05); }
-  .reset-all {
-    -webkit-appearance: none; appearance: none;
-    background: none; border: none; font-family: inherit;
-    font-size: 11px; color: rgba(255,255,255,0.38);
-    cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
-  }
-  .reset-all:hover { color: rgba(248,113,113,0.9); }
-
-  .segment {
-    display: inline-flex;
-    background: rgba(255,255,255,0.05);
-    border: 1px solid rgba(255,255,255,0.10);
-    border-radius: 9px;
-    padding: 2px;
-    gap: 2px;
-  }
-  .segment button {
-    background: transparent;
-    border: none;
-    color: rgba(255,255,255,0.55);
-    font-size: 11px;
-    font-family: inherit;
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    padding: 5px 13px;
-    border-radius: 7px;
-    cursor: pointer;
-    transition: background 0.25s, color 0.25s, transform 0.2s var(--spring);
-  }
-  .segment button:hover { color: rgba(255,255,255,0.85); }
-  .segment button:active { transform: scale(0.92); }
-  .segment button.on {
-    background: rgba(167,139,250,0.22);
-    color: #d9ceff;
-    box-shadow: inset 0 0 0 1px rgba(167,139,250,0.4);
-    animation: segPop 0.3s var(--spring);
-  }
-  @keyframes segPop { 50% { transform: scale(1.08); } }
-
   /* ── Bar row — always pinned at the bottom of the pill ─────────────────── */
   .bar {
     position: relative;
-    height: 56px;
+    height: 40px;
     flex-shrink: 0;
     display: flex;
     align-items: center;
-    padding: 0 19px;
-    gap: 12px;
+    padding: 0 15px;
+    gap: 10px;
     margin-top: auto;
     /* Follows the TARGET width like the panels do (shell clips it), so the
        row never reflows while the pill animates. */
@@ -612,7 +310,7 @@
     align-self: center;
   }
   /* Dropped: pinned at the full pill width so the 48px bead merely clips it. */
-  body.dropped .bar { width: 406px; opacity: 0; pointer-events: none; }
+  body.dropped .bar { width: 238px; opacity: 0; pointer-events: none; }
 
   /* ── Dot + listening ripple rings ──────────────────────────────────────── */
   .dot-wrap { position: relative; width: 8px; height: 8px; flex-shrink: 0; }
@@ -841,16 +539,25 @@
   .panel-actions {
     position: absolute;
     right: 14px;
-    bottom: 62px;               /* bar 56 + border 2 + 4 */
+    bottom: 46px;               /* bar 40 + border 2 + 4 */
     z-index: 3;
     display: none;
     gap: 6px;
     align-items: center;
   }
-  body.carousel-open .panel-actions, body.settings-open .panel-actions {
+  body.carousel-open .panel-actions {
     display: flex;
     animation: settingsIn 0.3s var(--smooth) forwards;
   }
+  /* Idle hover: the recap button appears inside the bar, nothing before. */
+  body.hovered.idle:not(.carousel-open):not(.setup-open):not(.dropped) .panel-actions,
+  body.hovered.running:not(.carousel-open):not(.setup-open):not(.dropped) .panel-actions {
+    display: flex;
+    bottom: 7px;
+    right: 8px;
+    animation: settingsIn 0.3s var(--smooth) forwards;
+  }
+  @keyframes settingsIn { from { opacity: 0; } to { opacity: 1; } }
   body.setup-open .panel-actions { display: none; }
   .panel-btn {
     width: 26px;
@@ -868,7 +575,6 @@
   .panel-btn:hover { color: #d9ceff; background: rgba(167,139,250,0.14); transform: scale(1.08); }
   .panel-btn:active { transform: scale(0.94); }
   .panel-btn svg { display: block; width: 15px; height: 15px; }
-  body.settings-open #gear { color: #c3b1fc; border-color: rgba(167,139,250,0.4); }
 
   /* Hover: everything breathes a little wider. */
   .bar > * { transition: transform 0.3s var(--smooth); }
@@ -884,8 +590,8 @@
       transition-duration: 0.01ms; transition-delay: 0s;
     }
     body.dropped .drop-glyph span { animation: none; }
-    .carousel.closing, .settings.closing, .setup.closing,
-    body.carousel-open .carousel, body.settings-open .settings, body.setup-open .setup {
+    .carousel.closing, .setup.closing,
+    body.carousel-open .carousel, body.setup-open .setup {
       animation-duration: 0.01ms;
     }
   }
@@ -907,7 +613,6 @@
     display: flex;
     animation: settingsIn 0.3s var(--smooth) forwards;
   }
-  body.setup-open .settings { display: none; }
   body.setup-open .carousel { display: none; }
 
   .setup-header {
@@ -998,192 +703,6 @@
 
   <div class="carousel" id="carousel"></div>
 
-  <div class="settings" id="settings">
-    <div class="settings-header">
-      <div class="settings-title" id="settings-title">paramètres</div>
-      <div class="settings-hint"><kbd>⌘</kbd><kbd>,</kbd></div>
-    </div>
-    <div class="settings-body" id="settings-body">
-
-      <div class="setting-group" id="grp-dictation">
-        <div class="group-title" id="grp-dictation-title">Dictée</div>
-        <div class="setting-warn" id="warn-acc" style="display:none">
-          <span id="warn-acc-text"></span>
-          <button class="update-btn" id="warn-acc-btn"></button>
-        </div>
-        <div class="setting-warn" id="warn-fn" style="display:none">
-          <span id="warn-fn-text"></span>
-          <button class="update-btn" id="warn-fn-btn"></button>
-        </div>
-        <div class="setting-row">
-          <div class="setting-label-col">
-            <div class="setting-label" id="lbl-dict-key">Touche</div>
-            <div class="setting-hint" id="hint-dictation"></div>
-          </div>
-          <div class="row-ctl">
-            <select id="dict-key-select" class="setting-select"></select>
-            <button class="reset-btn" data-reset="dictation_key">↺</button>
-          </div>
-        </div>
-        <div class="setting-row">
-          <div class="setting-label-col">
-            <div class="setting-label" id="lbl-stt-model">Modèle de transcription</div>
-            <div class="setting-hint" id="stt-progress" style="display:none"></div>
-          </div>
-          <div class="row-ctl">
-            <select id="stt-model-select" class="setting-select"></select>
-            <button class="reset-btn" data-reset="stt_model">↺</button>
-          </div>
-        </div>
-        <div class="setting-row">
-          <div class="setting-label" id="lbl-dict-cleanup">Nettoyage</div>
-          <div class="row-ctl">
-            <select id="dictation-format-select" class="setting-select"></select>
-            <button class="reset-btn" data-reset="dictation_format">↺</button>
-          </div>
-        </div>
-        <div class="setting-row vocab" id="row-vocab">
-          <div class="vocab-head" id="vocab-head">
-            <span class="vocab-chev" id="vocab-chev">▸</span>
-            <span class="setting-label" id="lbl-vocab">Vocabulaire</span>
-            <button class="reset-btn" id="vocab-reset">↺</button>
-          </div>
-          <div class="vocab-cols" id="vocab-cols" style="display:none">
-            <div class="vocab-col">
-              <div class="setting-hint" id="lbl-vocab-words">Mots</div>
-              <textarea id="vocab-words" class="vocab-area" spellcheck="false" placeholder="Orivo&#10;Tauri"></textarea>
-            </div>
-            <div class="vocab-col">
-              <div class="setting-hint" id="lbl-vocab-repl">Remplacements</div>
-              <textarea id="vocab-repl" class="vocab-area" spellcheck="false" placeholder="from => to"></textarea>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="setting-group">
-        <div class="group-title" id="grp-voice-title">Voix</div>
-        <div class="setting-row">
-          <div class="setting-label" id="lbl-lang">Langue</div>
-          <div class="row-ctl">
-            <div class="segment" id="lang-segment">
-              <button data-lang="fr">FR</button>
-              <button data-lang="en">EN</button>
-            </div>
-            <button class="reset-btn" data-reset="language">↺</button>
-          </div>
-        </div>
-        <div class="setting-row" id="row-tts-engine" style="display:none">
-          <div class="setting-label" id="lbl-tts-engine">Voix</div>
-          <div class="row-ctl">
-            <select id="tts-engine-select" class="setting-select"></select>
-            <button class="reset-btn" data-reset="tts_engine">↺</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="setting-group">
-        <div class="group-title" id="grp-brain-title">Cerveau</div>
-        <div class="setting-row">
-          <div class="setting-label" id="lbl-provider">IA</div>
-          <div class="row-ctl" style="flex:1;min-width:0;justify-content:flex-end">
-            <div class="setting-pair">
-              <select id="provider-select" class="setting-select"></select>
-              <select id="model-select" class="setting-select"></select>
-            </div>
-            <button class="reset-btn" data-reset="provider,model">↺</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="setting-group">
-        <div class="group-title" id="grp-agents-title">Agents</div>
-        <div class="setting-row">
-          <div class="setting-label" id="lbl-agent-reply">Réponse d'agent</div>
-          <div class="row-ctl">
-            <div class="segment" id="agent-reply-segment">
-              <button data-reply="summary">RÉSUMÉ</button>
-              <button data-reply="verbatim">MOT POUR MOT</button>
-            </div>
-            <button class="reset-btn" data-reset="agent_reply">↺</button>
-          </div>
-        </div>
-        <div class="setting-row" id="hermes-row" style="display:none">
-          <div class="setting-label" id="lbl-hermes">Hermes</div>
-          <div class="row-ctl">
-            <div class="segment" id="hermes-segment">
-              <button data-hermes="on">ON</button>
-              <button data-hermes="off">OFF</button>
-            </div>
-            <button class="reset-btn" data-reset="hermes_voice">↺</button>
-          </div>
-        </div>
-        <div class="setting-row">
-          <div class="setting-label" id="lbl-backend">Backend</div>
-          <div class="row-ctl">
-            <div class="segment" id="backend-segment">
-              <button data-backend="orca">ORCA</button>
-              <button data-backend="conductor">CONDUCTOR</button>
-            </div>
-            <button class="reset-btn" data-reset="backend">↺</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="setting-group">
-        <div class="group-title" id="grp-app-title">Application</div>
-        <div class="setting-row">
-          <div class="setting-label"><span id="lbl-glass">Transparence</span><span class="setting-tag" id="glass-tag" style="display:none">Liquid Glass</span></div>
-          <div class="row-ctl">
-            <div class="range-wrap">
-              <input type="range" id="glass-range" min="0" max="100" step="5" value="40">
-              <div class="setting-value range-value" id="glass-value">40 %</div>
-            </div>
-            <button class="reset-btn" data-reset="glass_transparency">↺</button>
-          </div>
-        </div>
-        <div class="setting-row">
-          <div class="setting-label" id="lbl-drop">Goutte</div>
-          <div class="row-ctl">
-            <div class="segment" id="drop-segment">
-              <button data-drop="60">1 MIN</button>
-              <button data-drop="180">3 MIN</button>
-              <button data-drop="600">10 MIN</button>
-              <button data-drop="0">JAMAIS</button>
-            </div>
-            <button class="reset-btn" data-reset="drop_after_secs">↺</button>
-          </div>
-        </div>
-        <div class="setting-row">
-          <div class="setting-label-col">
-            <div class="setting-label" id="lbl-licence">Licence Evey</div>
-            <div class="setting-hint" id="licence-hint"></div>
-          </div>
-          <div class="licence-ctl">
-            <input id="licence-key" class="setting-input" placeholder="sub_…" autocomplete="off" spellcheck="false">
-            <button class="update-btn" id="licence-btn">Activer</button>
-          </div>
-        </div>
-        <div class="setting-row">
-          <div class="setting-label" id="lbl-version">Version</div>
-          <div class="setting-value" id="app-version">—</div>
-        </div>
-        <div class="setting-row">
-          <div class="setting-label" id="lbl-update">Mises à jour</div>
-          <button class="update-btn" id="update-btn">Vérifier</button>
-        </div>
-        <div class="setting-row">
-          <div class="setting-label" id="lbl-setup">Installation</div>
-          <button class="update-btn" id="setup-repair-btn">Vérifier</button>
-        </div>
-        <div class="reset-all-wrap">
-          <button class="reset-all" id="reset-all">Tout réinitialiser</button>
-        </div>
-      </div>
-
-    </div>
-  </div>
-
   <div class="setup" id="setup">
     <div class="setup-header">
       <div class="setup-title" id="setup-title">installation</div>
@@ -1218,63 +737,14 @@
         <path d="M12 7v5l3.5 2"/>
       </svg>
     </button>
-    <button class="panel-btn" id="gear" aria-label="settings">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="3.2"/>
-        <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01a1.7 1.7 0 0 0 1.02-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.56 1.02H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1.06z"/>
-      </svg>
-    </button>
   </div>
 </div>
 
+<script src="shared.js"></script>
 <script>
 // ── Tauri bridge ──────────────────────────────────────────────────────────────
-const { invoke } = window.__TAURI__.core
-const { listen } = window.__TAURI__.event
 const { convertFileSrc } = window.__TAURI__.core
 
-// ── Evey licence (optional, settings) ────────────────────────────────────────
-;(function () {
-  const input = document.getElementById('licence-key')
-  const btn = document.getElementById('licence-btn')
-  const hint = document.getElementById('licence-hint')
-  const fr = () => { try { return uiLang !== 'en' } catch { return true } }
-  const T = {
-    label: ['Licence Evey', 'Evey licence'],
-    activate: ['Activer', 'Activate'], remove: ['Retirer', 'Remove'],
-    none: ['Optionnelle — Vox fonctionne sans.', 'Optional — Vox works without it.'],
-    valid: ['Active ✓', 'Active ✓'],
-    invalid: ['Clé non validée (hors ligne ?)', 'Key not validated (offline?)'],
-    inactive: ['Abonnement terminé', 'Subscription ended'],
-  }
-  const t = k => T[k][fr() ? 0 : 1]
-  let state = 'none'
-  function apply(st) {
-    state = (st && st.state) || 'none'
-    document.getElementById('lbl-licence').textContent = t('label')
-    const has = state !== 'none'
-    input.style.display = has ? 'none' : ''
-    btn.textContent = has ? t('remove') : t('activate')
-    hint.textContent = t(state in T ? state : 'none')
-    hint.classList.toggle('ok', state === 'valid')
-    hint.classList.toggle('err', state === 'inactive' || state === 'invalid')
-  }
-  btn.addEventListener('click', async () => {
-    btn.disabled = true
-    try {
-      if (state !== 'none') apply(await invoke('licence_clear'))
-      else { apply(await invoke('licence_activate', { key: input.value })); input.value = '' }
-    } catch (e) {
-      try { apply(await invoke('licence_status')) } catch {}
-      hint.textContent = String(e); hint.classList.add('err'); hint.classList.remove('ok')
-    }
-    btn.disabled = false
-  })
-  input.addEventListener('keydown', e => { if (e.key === 'Enter') btn.click() })
-  listen('licence-changed', ev => apply(ev.payload))
-  window.refreshLicenceI18n = () => invoke('licence_status').then(apply).catch(() => {})
-  window.refreshLicenceI18n()
-})()
 
 // ── VAD config ────────────────────────────────────────────────────────────────
 const SPEECH_THRESHOLD   = 0.015
@@ -1292,9 +762,7 @@ const SPEECH_SNR         = 2.2
 // hover stretch was the most-noticed motion in the UI for the least
 // information — nothing about the pill's meaning changes when the cursor
 // arrives.
-const SIZE_BASE     = [408, 56]
-// Fixed height: the grouped panel scrolls inside itself instead of growing the window.
-const SIZE_SETTINGS = [500, 560]
+const SIZE_BASE     = [240, 40]
 const SIZE_SETUP    = [520, 470]
 
 // CSS animates the pill's own width/height; Rust animates the native blur to
@@ -1323,7 +791,6 @@ let agentLabels = []
 let pendingAnnouncements = 0
 let appearing = false
 let returning = false
-let settingsOpen = false
 let carouselOpen = false
 let carouselCloseTimer = null
 let hovered = false
@@ -1332,78 +799,6 @@ let setupOpen = false
 let setupRunning = false
 let setupInitiated = false
 
-const LABEL_TABLE = {
-  fr: {
-    idle: '', active: 'à l\'écoute', listening: 'je t\'entends…',
-    thinking: 'réflexion…', speaking: 'réponse…', running: '',
-    boot: 'récap en cours…', announcing: 'annonce…',
-    dictating: '✎ dictée', 'dictation-processing': '✎ …',
-    dictation: 'Dictée', dictHint: 'Maintenir pour dicter · double-tap pour mains libres · Échap annule',
-    dictLlm: 'Nettoyage LLM', dictRaw: 'Transcription brute',
-    vocabWords: 'Mots (un par ligne)', vocabRepl: 'Remplacements (de => vers)',
-    dictLatched: '%s pour finir · Échap annule',
-    grpDict: 'Dictée', grpVoice: 'Voix', grpBrain: 'Cerveau', grpAgents: 'Agents', grpApp: 'Application',
-    dictKey: 'Touche', sttModel: 'Modèle de transcription', dictCleanup: 'Nettoyage', vocab: 'Vocabulaire',
-    toInstall: 'à installer', installing: 'installation…',
-    resetTip: 'Réinitialiser', resetAll: 'Tout réinitialiser',
-    resetAllConfirm: 'Réinitialiser tous les réglages (et vider le vocabulaire) ?',
-    vocabResetConfirm: 'Vider le vocabulaire ?',
-    accWarn: 'Accessibilité non accordée : Vox ne peut pas coller le texte dicté.', accBtn: 'Autoriser',
-    fnWarn: 'Pour utiliser Fn : Réglages Système → Clavier → « Appuyer sur 🌐 pour » → « Ne rien faire ».', fnBtn: 'Ouvrir',
-    dictKeys: { fn: 'Fn (🌐)', right_option: '⌥ droite', right_command: '⌘ droite', right_shift: '⇧ droite', alt_shift_space: '⌥⇧Espace' },
-    dictKeysShort: { fn: 'fn', right_option: '⌥ droite', right_command: '⌘ droite', right_shift: '⇧ droite', alt_shift_space: '⌥⇧Espace' },
-    settingsTitle: 'paramètres', model: 'Modèle', lang: 'Langue',
-    version: 'Version', update: 'Mises à jour', provider: 'IA',
-    provOllama: 'Local (Ollama)', provClaudeCli: 'Claude (abonnement)',
-    provCodexCli: 'Codex (abonnement)', provAnthropic: 'Claude (clé API)',
-    provOpenai: 'OpenAI (clé API)',
-    agentReply: 'Réponse d\'agent', replySummary: 'RÉSUMÉ', replyVerbatim: 'MOT POUR MOT',
-    glass: 'Transparence', drop: 'Goutte', dropNever: 'JAMAIS',
-    hermes: 'Hermes', hermesHint: 'Lit à voix haute les réponses de Hermes, en résumé ou mot pour mot selon « Réponse d\'agent ».',
-    backend: 'Backend', backendHint: 'Orca : agents ouverts comme onglets. Conductor : agents en arrière-plan. Pris en compte tout de suite, sans redémarrage.',
-    ttsEngine: 'Voix', engAuto: 'Automatique', engKokoro: 'Kokoro', engPiper: 'Piper',
-    engQwen: 'Qwen3 (test)', engSay: 'macOS (say)',
-    check: 'Vérifier', checking: '…', upToDate: 'À jour', download: 'Télécharger',
-    setupTitle: 'installation', setupInstall: 'Installer', setupDone: 'Terminé',
-    setupRetry: 'Réessayer', setupStatusBusy: 'installation en cours…',
-    setupStatusOk: 'prêt', setupStatusFail: 'échec — réessayez', repair: 'Vérifier',
-  },
-  en: {
-    idle: '', active: 'listening', listening: 'I hear you…',
-    thinking: 'thinking…', speaking: 'replying…', running: '',
-    boot: 'briefing…', announcing: 'heads up…',
-    dictating: '✎ dictating', 'dictation-processing': '✎ …',
-    dictation: 'Dictation', dictHint: 'Hold to dictate · double-tap for hands-free · Esc cancels',
-    dictLlm: 'LLM cleanup', dictRaw: 'Raw transcript',
-    vocabWords: 'Words (one per line)', vocabRepl: 'Replacements (from => to)',
-    dictLatched: '%s to finish · Esc cancels',
-    grpDict: 'Dictation', grpVoice: 'Voice', grpBrain: 'Brain', grpAgents: 'Agents', grpApp: 'App',
-    dictKey: 'Key', sttModel: 'Transcription model', dictCleanup: 'Cleanup', vocab: 'Vocabulary',
-    toInstall: 'to install', installing: 'installing…',
-    resetTip: 'Reset', resetAll: 'Reset everything',
-    resetAllConfirm: 'Reset all settings (and clear the vocabulary)?',
-    vocabResetConfirm: 'Clear the vocabulary?',
-    accWarn: 'Accessibility not granted: Vox cannot paste dictated text.', accBtn: 'Allow',
-    fnWarn: 'To use Fn: System Settings → Keyboard → “Press 🌐 to” → “Do Nothing”.', fnBtn: 'Open',
-    dictKeys: { fn: 'Fn (🌐)', right_option: 'Right ⌥', right_command: 'Right ⌘', right_shift: 'Right ⇧', alt_shift_space: '⌥⇧Space' },
-    dictKeysShort: { fn: 'fn', right_option: 'right ⌥', right_command: 'right ⌘', right_shift: 'right ⇧', alt_shift_space: '⌥⇧Space' },
-    settingsTitle: 'settings', model: 'Model', lang: 'Language',
-    version: 'Version', update: 'Updates', provider: 'AI',
-    provOllama: 'Local (Ollama)', provClaudeCli: 'Claude (subscription)',
-    provCodexCli: 'Codex (subscription)', provAnthropic: 'Claude (API key)',
-    provOpenai: 'OpenAI (API key)',
-    agentReply: 'Agent reply', replySummary: 'SUMMARY', replyVerbatim: 'VERBATIM',
-    glass: 'Transparency', drop: 'Drop', dropNever: 'NEVER',
-    hermes: 'Hermes', hermesHint: 'Reads Hermes\'s replies out loud, as a summary or verbatim depending on "Agent reply".',
-    backend: 'Backend', backendHint: 'Orca: agents open as tabs. Conductor: agents run in the background. Applies immediately, no restart.',
-    ttsEngine: 'Voice', engAuto: 'Automatic', engKokoro: 'Kokoro', engPiper: 'Piper',
-    engQwen: 'Qwen3 (test)', engSay: 'macOS (say)',
-    check: 'Check', checking: '…', upToDate: 'Up to date', download: 'Download',
-    setupTitle: 'setup', setupInstall: 'Install', setupDone: 'Done',
-    setupRetry: 'Retry', setupStatusBusy: 'installing…',
-    setupStatusOk: 'ready', setupStatusFail: 'failed — retry', repair: 'Check',
-  },
-}
 
 const COMP_LABELS = {
   fr: { python: 'Python', ffmpeg: 'ffmpeg', espeakNg: 'espeak-ng', ollama: 'Ollama',
@@ -1437,10 +832,9 @@ function setLabel(text) {
 // Reopening, or any other panel opening, cancels this at once.
 const panelEls = {
   carousel: document.getElementById('carousel'),
-  settings: document.getElementById('settings'),
   setup: document.getElementById('setup'),
 }
-const panelWasOpen = { carousel: false, settings: false, setup: false }
+const panelWasOpen = { carousel: false, setup: false }
 let panelCloseTimer = null
 
 function endPanelClose() {
@@ -1454,8 +848,8 @@ function endPanelClose() {
 }
 
 function updatePanels() {
-  const open = { carousel: carouselOpen, settings: settingsOpen, setup: setupOpen }
-  const anyOpen = open.carousel || open.settings || open.setup
+  const open = { carousel: carouselOpen, setup: setupOpen }
+  const anyOpen = open.carousel || open.setup
   if (anyOpen) {
     // A panel replacing another must not share the pill with its fading twin.
     endPanelClose()
@@ -1491,7 +885,6 @@ function bodyClasses() {
   document.body.className = state
     + (dropped ? ' dropped' : '')
     + (setupOpen ? ' setup-open' : '')
-    + (settingsOpen ? ' settings-open' : '')
     + (carouselOpen ? ' carousel-open' : '')
     + (hovered ? ' hovered' : '')
     + (transcriptEl.classList.contains('visible') ? ' has-transcript' : '')
@@ -1524,7 +917,7 @@ function setState(s) {
   animateWaveform(s)
 }
 
-// Outline robot head, same stroke language as the gear / recap icons.
+// Outline robot head, same stroke language as the recap icon.
 const AGENT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
   + '<rect x="4" y="8" width="16" height="12" rx="3.5"/>'
   + '<path d="M12 8V4.5"/><circle class="ag-ant" cx="12" cy="3.5" r="1"/>'
@@ -2139,7 +1532,7 @@ function noteActivity() {
   if (dropAfterMs <= 0) return
   dropTimer = setTimeout(() => {
     const quiet = (state === 'idle' || state === 'running') && !hovered
-      && !settingsOpen && !carouselOpen && !setupOpen && !userDragging
+      && !carouselOpen && !setupOpen && !userDragging
       && !transcriptEl.classList.contains('visible') && !appearing && !returning
     if (dropAfterMs > 0 && !dropped && quiet) enterDrop()
     else noteActivity()
@@ -2170,12 +1563,10 @@ function syncWindow(durOverride) {
     ;[w, h] = [s, s]
   } else if (setupOpen) {
     ;[w, h] = SIZE_SETUP
-  } else if (settingsOpen) {
-    ;[w, h] = SIZE_SETTINGS
   } else if (carouselOpen) {
     const cards = carouselEl.children.length
     w = 500
-    h = 56 + 22 + 30 + Math.min(Math.max(cards, 1), 4) * 45  // +30: action row
+    h = 40 + 22 + 30 + Math.min(Math.max(cards, 1), 4) * 45  // +30: action row
   } else {
     ;[w, h] = SIZE_BASE
   }
@@ -2222,7 +1613,7 @@ function buildCarousel(list) {
 
 function openCarousel() {
   clearTimeout(carouselCloseTimer)
-  if (settingsOpen || carouselOpen) return
+  if (carouselOpen) return
   noteActivity()
   if (dropped) wake()
   carouselOpen = true
@@ -2232,7 +1623,7 @@ function openCarousel() {
 
 // Click the pill to show or dismiss the worktree list.
 function toggleCarousel() {
-  if (settingsOpen || setupOpen) return
+  if (setupOpen) return
   noteActivity()
   if (carouselOpen) {
     closeCarousel(0)
@@ -2332,7 +1723,7 @@ listen('pill-hover', (e) => {
     if (hovered) return
     hovered = true
     bodyClasses()
-    if (!settingsOpen) syncWindow(dropped ? DROP_HOVER_MS : undefined)
+    syncWindow(dropped ? DROP_HOVER_MS : undefined)
     return
   }
   noteActivity()
@@ -2343,7 +1734,7 @@ listen('pill-hover', (e) => {
     hovered = false
     noteActivity()
     bodyClasses()
-    if (!settingsOpen) syncWindow(dropped ? DROP_HOVER_MS : undefined)
+    syncWindow(dropped ? DROP_HOVER_MS : undefined)
   }, 140)
 })
 
@@ -2400,7 +1791,6 @@ function setSetupBtn(text, running) {
 function renderSetupI18n() {
   const labels = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
   document.getElementById('setup-title').textContent = labels.setupTitle
-  document.getElementById('lbl-setup').textContent = labels.repair
   if (!setupRunning) setSetupBtn(labels.setupInstall, false)
   renderSetup(lastProbe)
 }
@@ -2409,9 +1799,6 @@ let lastProbe = null
 function openSetup() {
   noteActivity()
   dropped = false
-  if (settingsOpen) {
-    settingsOpen = false
-  }
   carouselOpen = false
   setupOpen = true
   bodyClasses()
@@ -2471,7 +1858,40 @@ setupBtn.addEventListener('click', () => {
   startSetup()
 })
 
-document.getElementById('setup-repair-btn').addEventListener('click', async () => {
+// ── Live settings (from the Settings window) ─────────────────────────────────
+// What the pill itself acts on: UI language, dictation key, tint, idle drop.
+let curSettings = {}
+
+function applyTransparency(t) {
+  const v = Math.min(100, Math.max(0, Number(t)))
+  const a = (0.62 * (1 - v / 100)).toFixed(3)
+  document.documentElement.style.setProperty('--tint-a', a)
+}
+
+function applyVisualSettings(s) {
+  applyTransparency(Number.isFinite(s.glass_transparency) ? s.glass_transparency : 40)
+  const secs = Number.isFinite(s.drop_after_secs) ? s.drop_after_secs : 180
+  dropAfterMs = secs * 1000
+  noteActivity()
+}
+
+function applyUiLang() {
+  const labels = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+  renderSetupI18n()
+  lastLabel = ''
+  setLabel(labels[state] || '')
+}
+
+function applySettings(s) {
+  Object.assign(curSettings, s)
+  uiLang = s.language || 'fr'
+  dictKey = s.dictation_key || 'fn'
+  applyVisualSettings(s)
+  applyUiLang()
+}
+
+listen('settings-changed', (e) => { if (e.payload) applySettings(e.payload) })
+listen('setup-open', async () => {
   openSetup()
   try {
     const probe = await invoke('probe_setup')
@@ -2480,366 +1900,6 @@ document.getElementById('setup-repair-btn').addEventListener('click', async () =
     if (probe.needsSetup) startSetup()
   } catch {}
 })
-
-// ── Settings ──────────────────────────────────────────────────────────────────
-const modelSelect = document.getElementById('model-select')
-const langSegment = document.getElementById('lang-segment')
-const agentReplySegment = document.getElementById('agent-reply-segment')
-const backendSegment = document.getElementById('backend-segment')
-const hermesRow = document.getElementById('hermes-row')
-const hermesSegment = document.getElementById('hermes-segment')
-const dropSegment = document.getElementById('drop-segment')
-const glassRange = document.getElementById('glass-range')
-const glassValue = document.getElementById('glass-value')
-const glassTag = document.getElementById('glass-tag')
-const providerSelect = document.getElementById('provider-select')
-const PROVIDERS = ['ollama', 'claude-cli', 'codex-cli', 'anthropic', 'openai']
-const PROVIDER_LABEL = {
-  'ollama': 'provOllama', 'claude-cli': 'provClaudeCli', 'codex-cli': 'provCodexCli',
-  'anthropic': 'provAnthropic', 'openai': 'provOpenai',
-}
-let providerStatus = {}
-
-function renderProviderOptions(current) {
-  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
-  providerSelect.innerHTML = ''
-  for (const p of PROVIDERS) {
-    const st = providerStatus[p] || { ok: true, detail: '' }
-    const o = document.createElement('option')
-    o.value = p
-    // Say WHY it can't be used rather than hiding it — the fix (set a key,
-    // install a CLI) is one action the user can take.
-    o.textContent = L[PROVIDER_LABEL[p]] + (st.ok ? '' : ' — ' + st.detail)
-    o.disabled = !st.ok && p !== current
-    providerSelect.appendChild(o)
-  }
-  providerSelect.value = current || 'ollama'
-}
-
-const dictFormatSelect = document.getElementById('dictation-format-select')
-const vocabWordsEl = document.getElementById('vocab-words')
-const vocabReplEl = document.getElementById('vocab-repl')
-const engineSelect = document.getElementById('tts-engine-select')
-const engineRow = document.getElementById('row-tts-engine')
-const ENGINE_KEYS = ['auto', 'kokoro', 'piper', 'qwen3', 'say']
-const ENGINE_LABEL = { auto: 'engAuto', kokoro: 'engKokoro', piper: 'engPiper',
-                       qwen3: 'engQwen', say: 'engSay' }
-let engineRowVisible = false
-
-const dictKeySelect = document.getElementById('dict-key-select')
-const sttSelect = document.getElementById('stt-model-select')
-const sttProgress = document.getElementById('stt-progress')
-const DICT_KEYS = ['fn', 'right_option', 'right_command', 'right_shift', 'alt_shift_space']
-let sttModels = []          // [{id,label,detail,installed}]
-let sttInstalling = null    // model id while install_stt runs
-
-function setText(id, txt) { const el = document.getElementById(id); if (el) el.textContent = txt }
-
-function renderSttOptions() {
-  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
-  const cur = sttSelect.value || curSettings.stt_model || 'whisper-small'
-  sttSelect.innerHTML = ''
-  const list = sttModels.length ? sttModels : [{ id: cur, label: cur, installed: true }]
-  for (const m of list) {
-    const o = document.createElement('option')
-    o.value = m.id
-    o.textContent = (m.label || m.id) + (m.installed ? '' : ' · ' + L.toInstall)
-    if (m.detail) o.title = m.detail
-    sttSelect.appendChild(o)
-  }
-  if (!list.some(m => m.id === cur)) {
-    const o = document.createElement('option'); o.value = cur; o.textContent = cur
-    sttSelect.appendChild(o)
-  }
-  sttSelect.value = cur
-}
-
-function renderDictationI18n() {
-  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
-  setText('grp-dictation-title', L.grpDict)
-  setText('grp-voice-title', L.grpVoice)
-  setText('grp-brain-title', L.grpBrain)
-  setText('grp-agents-title', L.grpAgents)
-  setText('grp-app-title', L.grpApp)
-  if (window.refreshLicenceI18n) window.refreshLicenceI18n()
-  setText('lbl-dict-key', L.dictKey)
-  setText('lbl-stt-model', L.sttModel)
-  setText('lbl-dict-cleanup', L.dictCleanup)
-  setText('lbl-vocab', L.vocab)
-  setText('hint-dictation', L.dictHint)
-  setText('lbl-vocab-words', L.vocabWords)
-  setText('lbl-vocab-repl', L.vocabRepl)
-  setText('reset-all', L.resetAll)
-  setText('warn-acc-text', L.accWarn); setText('warn-acc-btn', L.accBtn)
-  setText('warn-fn-text', L.fnWarn); setText('warn-fn-btn', L.fnBtn)
-  for (const b of document.querySelectorAll('.reset-btn')) b.title = L.resetTip
-  const ck = dictKeySelect.value || curSettings.dictation_key || 'fn'
-  dictKeySelect.innerHTML = ''
-  for (const k of DICT_KEYS) {
-    const o = document.createElement('option')
-    o.value = k; o.textContent = (L.dictKeys && L.dictKeys[k]) || k
-    dictKeySelect.appendChild(o)
-  }
-  dictKeySelect.value = ck
-  const cur = dictFormatSelect.value || 'llm'
-  dictFormatSelect.innerHTML = ''
-  for (const [v, k] of [['llm', 'dictLlm'], ['raw', 'dictRaw']]) {
-    const o = document.createElement('option')
-    o.value = v; o.textContent = L[k]
-    dictFormatSelect.appendChild(o)
-  }
-  dictFormatSelect.value = cur
-  renderSttOptions()
-}
-
-function renderEngineOptions() {
-  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
-  const cur = engineSelect.value
-  engineSelect.innerHTML = ''
-  for (const k of ENGINE_KEYS) {
-    const o = document.createElement('option')
-    o.value = k
-    o.textContent = L[ENGINE_LABEL[k]]
-    engineSelect.appendChild(o)
-  }
-  engineSelect.value = cur || 'auto'
-}
-
-// t: 0..100, 100 = most transparent. Only the CSS tint moves; the native glass
-// behind is untouched.
-function applyTransparency(t) {
-  const v = Math.min(100, Math.max(0, Number(t)))
-  const a = (0.62 * (1 - v / 100)).toFixed(3)
-  document.documentElement.style.setProperty('--tint-a', a)
-}
-
-function renderGlassValue(t) {
-  glassRange.value = t
-  glassRange.style.setProperty('--fill', t + '%')
-  glassValue.textContent = t + ' %'
-}
-
-// Apply the settings the renderer itself acts on (Init + each settings open).
-function applyVisualSettings(s) {
-  const t = Number.isFinite(s.glass_transparency) ? s.glass_transparency : 40
-  applyTransparency(t)
-  renderGlassValue(t)
-  const secs = Number.isFinite(s.drop_after_secs) ? s.drop_after_secs : 180
-  dropAfterMs = secs * 1000
-  for (const b of dropSegment.querySelectorAll('button')) {
-    b.classList.toggle('on', Number(b.dataset.drop) === secs)
-  }
-  noteActivity()
-}
-
-function applyUiLang() {
-  const labels = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
-  document.getElementById('settings-title').textContent = labels.settingsTitle
-  document.getElementById('lbl-lang').textContent = labels.lang
-  document.getElementById('lbl-version').textContent = labels.version
-  document.getElementById('lbl-update').textContent = labels.update
-  document.getElementById('lbl-agent-reply').textContent = labels.agentReply
-  document.getElementById('lbl-provider').textContent = labels.provider
-  document.getElementById('lbl-backend').textContent = labels.backend
-  document.getElementById('lbl-hermes').textContent = labels.hermes
-  hermesSegment.title = labels.hermesHint
-  backendSegment.title = labels.backendHint
-  document.getElementById('lbl-glass').textContent = labels.glass
-  document.getElementById('lbl-drop').textContent = labels.drop
-  const neverBtn = dropSegment.querySelector('button[data-drop="0"]')
-  if (neverBtn) neverBtn.textContent = labels.dropNever
-  document.getElementById('lbl-tts-engine').textContent = labels.ttsEngine
-  renderEngineOptions()
-  renderDictationI18n()
-  for (const b of agentReplySegment.querySelectorAll('button')) {
-    b.textContent = b.dataset.reply === 'summary' ? labels.replySummary : labels.replyVerbatim
-  }
-  renderUpdateBtn()
-  renderSetupI18n()
-  lastLabel = ''
-  setLabel(labels[state] || '')
-}
-
-// Update button reflects updateInfo: null → "Check", up-to-date, or "Download".
-let updateInfo = null
-const updateBtn = document.getElementById('update-btn')
-
-function renderUpdateBtn() {
-  const labels = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
-  updateBtn.disabled = false
-  updateBtn.classList.remove('ok')
-  if (!updateInfo) {
-    updateBtn.textContent = labels.check
-  } else if (updateInfo.checking) {
-    updateBtn.textContent = labels.checking
-    updateBtn.disabled = true
-  } else if (updateInfo.hasUpdate) {
-    updateBtn.textContent = labels.download + ' ' + updateInfo.latest
-  } else {
-    updateBtn.textContent = labels.upToDate
-    updateBtn.classList.add('ok')
-  }
-}
-
-updateBtn.addEventListener('click', async () => {
-  if (updateInfo && updateInfo.hasUpdate && updateInfo.url) {
-    invoke('open_url', { url: updateInfo.url })
-    return
-  }
-  updateInfo = { checking: true }
-  renderUpdateBtn()
-  try {
-    updateInfo = await invoke('check_update')
-  } catch {
-    updateInfo = null
-  }
-  renderUpdateBtn()
-})
-
-// Current vs default settings drive the per-row reset buttons (↺).
-let curSettings = {}
-let defaultSettings = {}
-
-function refreshResets() {
-  for (const btn of document.querySelectorAll('.reset-btn[data-reset]')) {
-    const keys = btn.dataset.reset.split(',')
-    const differs = keys.some(k =>
-      defaultSettings[k] !== undefined && curSettings[k] !== undefined && curSettings[k] !== defaultSettings[k])
-    btn.classList.toggle('show', differs)
-  }
-}
-
-// Persist a patch, keep the local copy in sync with what the backend says it
-// stored, and refresh the reset buttons. Returns the stored settings (or null).
-async function saveSettings(patch) {
-  Object.assign(curSettings, patch)
-  let next = null
-  try {
-    next = await invoke('set_settings', { next: patch })
-    if (next && typeof next === 'object') Object.assign(curSettings, next)
-  } catch (err) {
-    console.warn('[vox] set_settings failed:', err)
-  }
-  refreshResets()
-  return next
-}
-
-// Accessibility / Fn-key warnings at the top of the Dictée group. Re-checked
-// each time the panel opens, when the key changes and when the window regains
-// focus (the user just came back from System Settings).
-async function refreshDictStatus() {
-  const accEl = document.getElementById('warn-acc')
-  const fnEl = document.getElementById('warn-fn')
-  let accOk = true, fnOk = true
-  try { accOk = (await invoke('accessibility_status')) !== false }
-  catch (err) { console.warn('[vox] accessibility_status failed:', err) }
-  if ((curSettings.dictation_key || 'fn') === 'fn') {
-    try {
-      const st = await invoke('fn_key_status')
-      fnOk = !(st && st.globe_does_nothing === false)
-    } catch (err) { console.warn('[vox] fn_key_status failed:', err) }
-  }
-  accEl.style.display = accOk ? 'none' : ''
-  fnEl.style.display = fnOk ? 'none' : ''
-}
-window.addEventListener('focus', () => { if (settingsOpen) refreshDictStatus() })
-document.getElementById('warn-acc-btn').addEventListener('click', async () => {
-  try { await invoke('request_accessibility') } catch (err) { console.warn('[vox] request_accessibility failed:', err) }
-  refreshDictStatus()
-})
-document.getElementById('warn-fn-btn').addEventListener('click', () => {
-  invoke('open_url', { url: 'x-apple.systempreferences:com.apple.Keyboard-Settings.extension' })
-    .catch((err) => console.warn('[vox] open_url failed:', err))
-})
-
-// Push `curSettings` into every control (also used after a reset).
-async function fillControls() {
-  const s = curSettings
-  uiLang = s.language || 'fr'
-  dictKey = s.dictation_key || 'fn'
-  dictKeySelect.value = s.dictation_key || 'fn'
-  dictFormatSelect.value = s.dictation_format || 'llm'
-  sttSelect.value = s.stt_model || 'whisper-small'
-  applyUiLang()
-  renderProviderOptions(s.provider || 'ollama')
-  await reloadModels(s.provider || 'ollama', s.model)
-  for (const btn of langSegment.querySelectorAll('button')) {
-    btn.classList.toggle('on', btn.dataset.lang === uiLang)
-  }
-  for (const btn of agentReplySegment.querySelectorAll('button')) {
-    btn.classList.toggle('on', btn.dataset.reply === (s.agent_reply || 'summary'))
-  }
-  for (const btn of backendSegment.querySelectorAll('button')) {
-    btn.classList.toggle('on', btn.dataset.backend === (s.backend || 'orca'))
-  }
-  // Only offered when Hermes is actually on this machine.
-  invoke('hermes_info').then((h) => {
-    hermesRow.style.display = h && h.installed ? '' : 'none'
-  }).catch(() => { hermesRow.style.display = 'none' })
-  for (const btn of hermesSegment.querySelectorAll('button')) {
-    btn.classList.toggle('on', (btn.dataset.hermes === 'on') === (s.hermes_voice !== false))
-  }
-  applyVisualSettings(s)
-  if (engineRowVisible) engineSelect.value = s.tts_engine || 'auto'
-  refreshResets()
-}
-
-async function openSettings() {
-  if (settingsOpen) return
-  // Settings takes the panel space — retire the carousel and setup instantly.
-  clearTimeout(carouselCloseTimer)
-  carouselOpen = false
-  setupOpen = false
-  settingsOpen = true
-  dropped = false
-  noteActivity()
-  bodyClasses()
-  syncWindow(WAKE_MS)
-  document.getElementById('settings-body').scrollTop = 0
-
-  curSettings = await invoke('get_settings')
-  uiLang = curSettings.language || 'fr'
-  applyUiLang()
-  applyVisualSettings(curSettings)
-  invoke('glass_info').then((g) => {
-    glassTag.style.display = g && g.liquid_glass ? '' : 'none'
-  }).catch(() => { glassTag.style.display = 'none' })
-
-  try {
-    document.getElementById('app-version').textContent = 'v' + (await invoke('get_version'))
-  } catch {}
-
-  invoke('settings_defaults').then((d) => { defaultSettings = d || {}; refreshResets() })
-    .catch((err) => console.warn('[vox] settings_defaults failed:', err))
-  invoke('stt_models').then((m) => { sttModels = Array.isArray(m) ? m : []; renderSttOptions() })
-    .catch((err) => console.warn('[vox] stt_models failed:', err))
-
-  // Provider first: it decides which model list is even meaningful.
-  providerStatus = await invoke('provider_status').catch(() => ({}))
-
-  // Only offer the voice-engine picker once there is something to pick: until
-  // Qwen is installed the choice is between two engines the user can't hear
-  // apart (one per language), so the row would be noise.
-  const probe = lastProbe || await invoke('probe_setup').catch(() => null)
-  engineRowVisible = !!(probe && probe.qwenReady)
-  engineRow.style.display = engineRowVisible ? '' : 'none'
-
-  await fillControls()
-  refreshDictStatus()
-  loadVocabulary()
-}
-
-function closeSettings() {
-  if (!settingsOpen) return
-  settingsOpen = false
-  noteActivity()
-  bodyClasses()
-  syncWindow()
-}
-
-function toggleSettings() {
-  if (settingsOpen) closeSettings(); else openSettings()
-}
 
 const qwenBtn = document.getElementById('qwen-btn')
 qwenBtn.addEventListener('click', async () => {
@@ -2861,7 +1921,6 @@ qwenBtn.addEventListener('click', async () => {
   qwenBtn.disabled = false
 })
 
-document.getElementById('gear').addEventListener('click', toggleSettings)
 
 // Recap button — replay the worktree recap on demand. Ignored while Vox is
 // already busy talking/listening/thinking (sessions would just queue up),
@@ -2876,221 +1935,7 @@ document.getElementById('recap-btn').addEventListener('click', () => {
   }
 })
 
-providerSelect.addEventListener('change', async () => {
-  const next = await saveSettings({ provider: providerSelect.value })
-  // The backend resets `model` to that provider's default, because model ids
-  // don't transfer — reload the list and show what it actually picked.
-  const st = next || curSettings
-  await reloadModels(st.provider || providerSelect.value, st.model)
-})
 
-async function reloadModels(provider, model) {
-  const models = await invoke('list_models', { provider }).catch(() => [])
-  modelSelect.innerHTML = ''
-  for (const name of models) {
-    const o = document.createElement('option')
-    o.value = name; o.textContent = name
-    modelSelect.appendChild(o)
-  }
-  if (model && !models.includes(model)) {
-    const o = document.createElement('option')
-    o.value = model; o.textContent = model
-    modelSelect.appendChild(o)
-  }
-  modelSelect.value = model || (models[0] || '')
-}
-
-// Vocabulary: one word per line / `from => to` per line. A failing command only
-// logs — the panel stays usable.
-async function loadVocabulary() {
-  try {
-    const v = await invoke('get_vocabulary')
-    vocabWordsEl.value = (v.words || []).join('\n')
-    vocabReplEl.value = (v.replacements || []).map(r => r.from + ' => ' + r.to).join('\n')
-    refreshVocabReset()
-  } catch (err) {
-    console.warn('[vox] get_vocabulary failed:', err)
-  }
-}
-
-function saveVocabulary() {
-  const words = vocabWordsEl.value.split('\n').map(l => l.trim()).filter(Boolean)
-  const replacements = []
-  for (const line of vocabReplEl.value.split('\n')) {
-    const i = line.indexOf('=>')
-    if (i < 0) continue
-    const from = line.slice(0, i).trim(), to = line.slice(i + 2).trim()
-    if (from) replacements.push({ from, to })
-  }
-  invoke('set_vocabulary', { vocab: { words, replacements } })
-    .catch((err) => console.warn('[vox] set_vocabulary failed:', err))
-}
-document.getElementById('vocab-head').addEventListener('click', (e) => {
-  if (e.target.closest('.reset-btn')) return
-  const row = document.getElementById('row-vocab')
-  const open = row.classList.toggle('open')
-  document.getElementById('vocab-cols').style.display = open ? '' : 'none'
-})
-document.getElementById('vocab-reset').addEventListener('click', () => {
-  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
-  if (!confirm(L.vocabResetConfirm)) return
-  vocabWordsEl.value = ''; vocabReplEl.value = ''
-  saveVocabulary()
-  refreshVocabReset()
-})
-function refreshVocabReset() {
-  const has = vocabWordsEl.value.trim() || vocabReplEl.value.trim()
-  document.getElementById('vocab-reset').classList.toggle('show', !!has)
-}
-vocabWordsEl.addEventListener('input', refreshVocabReset)
-vocabReplEl.addEventListener('input', refreshVocabReset)
-vocabWordsEl.addEventListener('change', saveVocabulary)
-vocabReplEl.addEventListener('change', saveVocabulary)
-vocabWordsEl.addEventListener('blur', saveVocabulary)
-vocabReplEl.addEventListener('blur', saveVocabulary)
-
-dictFormatSelect.addEventListener('change', () => {
-  saveSettings({ dictation_format: dictFormatSelect.value })
-})
-
-modelSelect.addEventListener('change', () => {
-  saveSettings({ model: modelSelect.value })
-})
-
-dictKeySelect.addEventListener('change', async () => {
-  dictKey = dictKeySelect.value
-  await saveSettings({ dictation_key: dictKeySelect.value })
-  refreshDictStatus()
-})
-
-// Choosing a model that isn't installed installs it first (progress comes from
-// setup-log events tagged "stt"), and only then saves the setting. On failure
-// the select goes back to the previous model and the error is shown.
-function setSttProgress(text, cls) {
-  sttProgress.style.display = text ? '' : 'none'
-  sttProgress.className = 'setting-hint' + (cls ? ' ' + cls : '')
-  sttProgress.textContent = text || ''
-}
-sttSelect.addEventListener('change', async () => {
-  const id = sttSelect.value
-  const prev = curSettings.stt_model || 'whisper-small'
-  const m = sttModels.find(x => x.id === id)
-  if (!m || m.installed) {
-    setSttProgress('')
-    saveSettings({ stt_model: id })
-    return
-  }
-  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
-  sttInstalling = id
-  sttSelect.disabled = true
-  setSttProgress(L.installing, 'busy')
-  try {
-    await invoke('install_stt', { model: id })
-    m.installed = true
-    sttInstalling = null
-    setSttProgress('')
-    renderSttOptions()
-    sttSelect.value = id
-    await saveSettings({ stt_model: id })
-  } catch (err) {
-    console.warn('[vox] install_stt failed:', err)
-    sttInstalling = null
-    sttSelect.value = prev
-    setSttProgress(String((err && err.message) || err), 'err')
-  }
-  sttSelect.disabled = false
-})
-
-// Restarts the TTS daemon and speaks a fixed sample line — the A/B in one click.
-engineSelect.addEventListener('change', () => {
-  saveSettings({ tts_engine: engineSelect.value })
-})
-
-// No daemon restart here, unlike the language toggle: the announcement path
-// reads this per turn.
-agentReplySegment.addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-reply]')
-  if (!btn) return
-  for (const b of agentReplySegment.querySelectorAll('button')) b.classList.toggle('on', b === btn)
-  saveSettings({ agent_reply: btn.dataset.reply })
-})
-
-hermesSegment.addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-hermes]')
-  if (!btn) return
-  for (const b of hermesSegment.querySelectorAll('button')) b.classList.toggle('on', b === btn)
-  saveSettings({ hermes_voice: btn.dataset.hermes === 'on' })
-})
-
-// No restart: every workspace lookup re-reads it, so the next turn (and the
-// next watcher tick) already uses the new backend.
-backendSegment.addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-backend]')
-  if (!btn) return
-  for (const b of backendSegment.querySelectorAll('button')) b.classList.toggle('on', b === btn)
-  saveSettings({ backend: btn.dataset.backend })
-})
-
-// Live preview while dragging; persisted once the thumb settles.
-let glassSaveTimer = null
-glassRange.addEventListener('input', () => {
-  const n = Number(glassRange.value)
-  applyTransparency(n)
-  renderGlassValue(n)
-  noteActivity()
-  clearTimeout(glassSaveTimer)
-  glassSaveTimer = setTimeout(() => {
-    saveSettings({ glass_transparency: n })
-  }, 150)
-})
-
-dropSegment.addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-drop]')
-  if (!btn) return
-  for (const b of dropSegment.querySelectorAll('button')) b.classList.toggle('on', b === btn)
-  const secs = Number(btn.dataset.drop)
-  dropAfterMs = secs * 1000
-  saveSettings({ drop_after_secs: secs })
-  noteActivity()
-})
-
-langSegment.addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-lang]')
-  if (!btn) return
-  for (const b of langSegment.querySelectorAll('button')) b.classList.toggle('on', b === btn)
-  uiLang = btn.dataset.lang
-  applyUiLang()
-  saveSettings({ language: btn.dataset.lang })
-})
-
-// Per-row reset: write the default(s) for the row's key(s), then redraw.
-for (const btn of document.querySelectorAll('.reset-btn[data-reset]')) {
-  btn.addEventListener('click', async (e) => {
-    e.stopPropagation()
-    const patch = {}
-    for (const k of btn.dataset.reset.split(',')) {
-      if (defaultSettings[k] !== undefined) patch[k] = defaultSettings[k]
-    }
-    if (!Object.keys(patch).length) return
-    const next = await saveSettings(patch)
-    if (!next) Object.assign(curSettings, patch)
-    await fillControls()
-    if (patch.dictation_key !== undefined) refreshDictStatus()
-  })
-}
-
-document.getElementById('reset-all').addEventListener('click', async () => {
-  const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
-  if (!confirm(L.resetAllConfirm)) return
-  if (Object.keys(defaultSettings).length) {
-    await saveSettings({ ...defaultSettings })
-    await fillControls()
-  }
-  vocabWordsEl.value = ''; vocabReplEl.value = ''
-  saveVocabulary()
-  refreshVocabReset()
-  refreshDictStatus()
-})
 
 // ── Events from Rust ─────────────────────────────────────────────────────────
 // Restarting a CSS animation needs the class off, a forced reflow, then on —
@@ -3124,7 +1969,6 @@ listen('pill-appear', playReturn)
 listen('pill-shown', playEntrance)
 
 listen('toggle-listening', toggleVox)
-listen('toggle-settings', toggleSettings)
 
 listen('setup-needed', (e) => {
   lastProbe = e.payload
@@ -3133,9 +1977,6 @@ listen('setup-needed', (e) => {
 
 listen('setup-log', (e) => {
   appendLog(e.payload.tag || 'setup', e.payload.line || '')
-  if (sttInstalling && e.payload.tag === 'stt' && e.payload.line) {
-    setSttProgress(String(e.payload.line).trim().slice(0, 90), 'busy')
-  }
 })
 
 // Last-resort unbricking. The pill only leaves a speaking state on
@@ -3197,7 +2038,7 @@ listen('play-wav', (e) => {
     // Sessions serialize on the Rust side, so the recap may start speaking
     // after another reply's speaking-done already closed the carousel —
     // reopen it lazily whenever a workspace-tagged sentence plays.
-    if (!carouselOpen && !settingsOpen && carouselEl.children.length > 0) openCarousel()
+    if (!carouselOpen && carouselEl.children.length > 0) openCarousel()
     highlightWorkspace(e.payload.workspace)
   }
   let acked = false
@@ -3325,10 +2166,7 @@ listen('startup-brief-starting', () => {
   // Initial pill size, unanimated: tells Rust where the native blur starts.
   syncWindow()
   try {
-    const s = await invoke('get_settings')
-    uiLang = s.language || 'fr'
-    dictKey = s.dictation_key || 'fn'
-    applyVisualSettings(s)
+    applySettings(await invoke('get_settings'))
   } catch {}
   applyUiLang()
   setState('idle')
@@ -3343,7 +2181,7 @@ listen('startup-brief-starting', () => {
   } catch {}
 })()
 
-console.log('[vox renderer] ready — ⌥Space to talk, ⌘, or gear for settings')
+console.log('[vox renderer] ready — ⌥Space to talk, ⌘, opens Settings')
 </script>
 </body>
 </html>

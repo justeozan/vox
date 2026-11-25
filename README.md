@@ -38,7 +38,7 @@ Everything runs on your machine. No cloud calls, no API keys.
 ## Features
 
 - **Voice orchestrator, not a chatbot.** Vox reads Orca's CLI (or Conductor's SQLite database, read-only) to know every worktree's agent, status, and last message, and uses that as grounding for every answer — it's told never to invent a project, PR, or bug that isn't in the data. Repos you've hidden in Conductor (or archived worktrees in Orca) are ignored everywhere (recap, carousel, voice targeting).
-- **Startup recap with a live carousel.** On launch, once the local TTS model is warm, Vox speaks a one-sentence status for each in-progress worktree (agent still working / errored / waiting on you / done and ready to test) while the pill expands into a vertical carousel of worktree cards that scrolls to whichever one is being discussed. Quiet worktrees are grouped into a single line instead of repeated one by one, phrasing rotates between runs, and the recap closes with an LLM recommendation grounded in each worktree's *original ask* — including a proposed follow-up prompt when an agent's result looks done. Option+Space skips it, and the recap button (bottom-right of the open project list, next to the settings gear) replays it anytime.
+- **Startup recap with a live carousel.** On launch, once the local TTS model is warm, Vox speaks a one-sentence status for each in-progress worktree (agent still working / errored / waiting on you / done and ready to test) while the pill expands into a vertical carousel of worktree cards that scrolls to whichever one is being discussed. Quiet worktrees are grouped into a single line instead of repeated one by one, phrasing rotates between runs, and the recap closes with an LLM recommendation grounded in each worktree's *original ask* — including a proposed follow-up prompt when an agent's result looks done. Option+Space skips it, and the recap button (revealed on hover over the pill, and in the open project list) replays it anytime.
 - **Live transcript.** What Vox says appears sentence-by-sentence as it's spoken, and the last sentence — usually the recommendation — stays readable after the voice stops.
 - **Streaming replies.** Speech starts on the first complete sentence while the local LLM is still generating the rest — sentence N+1 is synthesized while sentence N plays.
 - **Launch an agent on any repo, as many as you want.** One `launch_agent` command targets a repo name, a worktree codename, or `"here"` for the active project — every repo Conductor knows about, not just the ones with work in progress. Names are matched exactly first, then fuzzily (so a mangled transcription still lands), and a name that matches two repos equally is a spoken question rather than a coin flip. Up to four agents run at once; ⌥Space within two seconds of a launch cancels it, and "stop" kills them all.
@@ -51,7 +51,7 @@ Everything runs on your machine. No cloud calls, no API keys.
 - **Choice of speech model.** Whisper small (default), Whisper large-v3 turbo (MLX), or Parakeet v3 (MLX — about 0.05 s per sentence on Apple Silicon, multilingual, but no vocabulary priming). Picked in settings, installed on demand into `~/.vox/venv`; used for both dictation and the assistant.
 - **Vocabulary.** Words Whisper keeps mangling, and `from => to` replacements, edited in settings (stored in `~/.vox/vocabulary.json`). Used by dictation.
 - **Pronunciation dictionary.** Drop word → phonetic pairs in `~/.vox/pronunciations.json` (e.g. `{"Orca": "orka"}`) to fix names the TTS engine mangles.
-- **Settings panel** (Cmd+,): choose the brain (provider + model, on one row — the model list follows the provider), toggle FR/EN, pick how agent answers are spoken, choose whether a voice-launched agent runs in Orca or headless, see the running version, and check GitHub for a newer release.
+- **Settings window** (Cmd+,, or *Settings…* in the menu-bar icon): choose the brain (provider + model, on one row — the model list follows the provider), toggle FR/EN, pick how agent answers are spoken, choose whether a voice-launched agent runs in Orca or headless, see the running version, and check GitHub for a newer release.
 
 ## Requirements
 
@@ -79,9 +79,9 @@ Everything runs on your machine. No cloud calls, no API keys.
 |---|---|
 | **Option+Space** | Start/stop listening. Also interrupts Vox while it's speaking or during the startup recap. |
 | **Fn** (configurable) | Dictate into the app in front: hold to talk, release to type. Double-tap for hands-free, press again to finish; Esc cancels. |
-| **Cmd+,** | Open/close settings — grouped (Dictation, Voice, Brain, Agents); every setting has a ↺ to go back to its default. |
+| **Cmd+,** | Open the Settings window (focus it if already open; Esc / Cmd+W close it) — tabs Dictation, Voice, Brain, Agents, About; every setting has a ↺ to go back to its default. Only active while Vox is focused, or from the tray icon. |
 
-Click the pill to open the project list, then the settings gear at its bottom-right; the shortcut works too.
+Click the pill to open the project list. Settings live in their own window: Cmd+, or the tray icon's *Settings…*.
 
 Example things to say:
 
@@ -156,7 +156,7 @@ Vox is a [Tauri 2](https://v2.tauri.app) app: a Rust backend (`src-tauri/`) driv
 ## Evey licence (optional)
 
 Vox is open source and fully usable without a key — nothing is locked. If you have an
-[Evey](https://evey.run) subscription, paste your key in **Settings → Application → Evey
+[Evey](https://evey.run) subscription, paste your key in **Settings → About → Evey
 licence** (or click `vox://activate?key=...` on your access page). It is checked online every
 12 hours and stays valid offline for 14 days. What it unlocks will come later.
 
