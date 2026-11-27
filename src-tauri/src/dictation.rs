@@ -277,7 +277,10 @@ fn process(app: &AppHandle, state: &Arc<AppState>, samples: &[f32]) {
     }
 
     let vocab = load_vocabulary();
-    let prompt = dt::whisper_prompt(&vocab.words, previous.as_deref().or(ctx.before.as_deref()));
+    // Orca repo/worktree/branch names join the user's words in the Whisper prompt
+    // only (never persisted, no fuzzy rewrite of free prose).
+    let terms = crate::vocab::effective_vocab(&vocab.words, &crate::vocab::catalog_terms(&crate::workspace::catalog()));
+    let prompt = dt::whisper_prompt(&terms, previous.as_deref().or(ctx.before.as_deref()));
     let t = Instant::now();
     let raw = crate::speech::transcribe_with_prompt(state, &tmp, Some(&prompt));
     let _ = std::fs::remove_file(&tmp);
@@ -304,7 +307,7 @@ fn process(app: &AppHandle, state: &Arc<AppState>, samples: &[f32]) {
     }
 
     let use_llm = state.settings.lock().unwrap().dictation_format == "llm";
-    let formatted = if use_llm { format_with_llm(state, &raw, &ctx, &vocab.words, fr) } else { None };
+    let formatted = if use_llm { format_with_llm(state, &raw, &ctx, &terms, fr) } else { None };
     let was_formatted = formatted.is_some();
     let text = formatted.unwrap_or_else(|| raw.clone());
     let pairs: Vec<(String, String)> = vocab.replacements.iter().map(|r| (r.from.clone(), r.to.clone())).collect();

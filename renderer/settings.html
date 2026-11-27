@@ -127,6 +127,7 @@
               <textarea id="vocab-repl" class="vocab-area" spellcheck="false" placeholder="from => to"></textarea>
             </div>
           </div>
+          <div class="vocab-suggest" id="vocab-suggest" style="display:none"></div>
         </div>
       </div>
     </section>
@@ -647,6 +648,36 @@ async function loadVocabulary() {
     refreshVocabReset()
   } catch (err) {
     console.warn('[vox] get_vocabulary failed:', err)
+  }
+  loadVocabSuggestions()
+}
+
+// Near-miss corrections Vox just made ("findi" → "findy"): one discreet line
+// each, kept only if the user accepts. Nothing is saved otherwise.
+async function loadVocabSuggestions() {
+  const box = document.getElementById('vocab-suggest')
+  try {
+    const list = await invoke('get_vocab_suggestions')
+    const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
+    box.replaceChildren(...list.map(([from, to]) => {
+      const row = document.createElement('div')
+      row.className = 'setting-hint'
+      row.append(`${L.vocabSuggest} ${from} → ${to} `)
+      for (const [mark, accept] of [['✓', true], ['✕', false]]) {
+        const b = document.createElement('button')
+        b.className = 'reset-btn'
+        b.textContent = mark
+        b.addEventListener('click', async () => {
+          await invoke('resolve_vocab_suggestion', { from, accept }).catch(() => {})
+          loadVocabulary()
+        })
+        row.append(b)
+      }
+      return row
+    }))
+    box.style.display = list.length ? '' : 'none'
+  } catch (err) {
+    console.warn('[vox] get_vocab_suggestions failed:', err)
   }
 }
 
