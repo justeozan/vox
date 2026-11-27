@@ -28,7 +28,7 @@ The loop it closes:
 
 > **Launch** — *"lance un agent sur findy pour corriger les tests"* — and it goes, on any repo Orca (or Conductor) knows about.
 > **Follow** — *"où en sont mes agents ?"* — answered from what is actually running, with elapsed time.
-> **Hear back** — when an agent answers, Vox tells you out loud, summarized or word for word.
+> **Hear back** — when an agent answers, Vox tells you out loud, summarized or word for word. If it's blocked on you, just answer — *"oui vas-y"*, *"non"*, *"fais plutôt X"* — and it goes to that worktree, no project name needed (90 s window, FR/EN, no LLM involved).
 > **Ask** — *"il a dit quoi ?"* — the result stays answerable for half an hour.
 
 On launch it asks Orca what every worktree is doing and speaks a recap: which agent is working, which is blocked on you, which errored, and what to look at first. Everything runs on your machine by default — no cloud calls, no API keys.

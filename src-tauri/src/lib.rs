@@ -20,6 +20,7 @@ pub mod licence;
 pub mod llm;
 pub mod logfile;
 pub mod orca;
+pub mod quick_reply;
 pub mod setup;
 pub mod speech;
 pub mod targets;
@@ -464,6 +465,9 @@ pub struct AppState {
     pub announce_q: Arc<(Mutex<announce::Queue>, Condvar)>,
     /// Unix seconds of the last spoken "I could do X next" offer.
     pub last_proposal_at: AtomicU64,
+    /// The blocked agent a bare "oui" / "non" answers, for a short window
+    /// after its announcement was spoken. See `quick_reply.rs`.
+    pub quick_reply: Mutex<Option<quick_reply::QuickReply>>,
     /// (cwd, unix) for agents Vox launched recently. Guards against announcing
     /// the same work twice should a Conductor bridge ever exist. (Conductor
     /// backend only: an Orca agent lives in Orca, so the watcher is the one voice.)
@@ -1704,6 +1708,7 @@ pub fn run() {
         agent_results: Mutex::new(VecDeque::new()),
         announce_q: Arc::new((Mutex::new(announce::Queue::default()), Condvar::new())),
         last_proposal_at: AtomicU64::new(0),
+        quick_reply: Mutex::new(None),
         vox_cwds: Mutex::new(Vec::new()),
         orca_launches: Mutex::new(Vec::new()),
         orca_working: AtomicUsize::new(0),
