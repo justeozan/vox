@@ -11,6 +11,10 @@
   that opens the Accessibility pane.
 
 ### Added
+- **Voice commands on selected text.** Select text, hold the dictation key and say
+  "rends ça plus poli", "translate to English", "raccourcis": the brain edits the
+  selection and ⌘V replaces it. No selection → normal dictation. On any failure the
+  selection is left untouched.
 - **Settings in their own window (⌘,).** The pill is now a small 240×40 bar with no
   gear and no settings panel; the recap button appears on hover. ⌘, (app menu)
   and the tray's *Settings…* open a separate window (singleton, Esc / ⌘W close
