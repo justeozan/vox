@@ -75,3 +75,22 @@ the relevant lines from the app's stdout (`[vox] …`). A short repro helps a lo
 
 Please **do not** open public issues for security problems — see
 [SECURITY.md](SECURITY.md).
+
+## Releasing
+
+Write user-facing changes under `## Unreleased` in `CHANGELOG.md` as you go. To release:
+
+1. GitHub → Actions → **prepare-release** → *Run workflow* with the version (`X.Y.Z`).
+   It runs `node scripts/release.mjs bump X.Y.Z`, which syncs `package.json`,
+   `package-lock.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and
+   `Cargo.lock`, and turns `Unreleased` into `## X.Y.Z - date`. It then commits to `main`,
+   tags `vX.Y.Z` and starts the **release** workflow.
+2. **release** checks the version against the tag, builds, signs and notarises the app, and
+   publishes the GitHub Release with that changelog section as its notes
+   (and the `.dmg` to R2 when configured).
+
+The same can be done locally (`node scripts/release.mjs bump X.Y.Z`, commit, `git tag vX.Y.Z`,
+`git push --tags`). `npm run release:check` verifies the versions agree and
+`npm run test:release` runs the tooling's tests; CI runs both. `prepare-release` needs a `main`
+that `github-actions[bot]` can push to, or a `RELEASE_TOKEN` secret (a PAT allowed to bypass
+protection).
