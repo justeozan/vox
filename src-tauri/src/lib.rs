@@ -78,7 +78,7 @@ pub struct Settings {
     #[serde(default = "default_dictation_format")]
     pub dictation_format: String,
     /// Speech-to-text engine for everything (assistant and dictation):
-    /// "whisper-small" | "whisper-large-v3-turbo" | "parakeet-v3".
+    /// "parakeet-v3" (default; whisper-small on Intel) | "whisper-small" | "whisper-large-v3-turbo".
     #[serde(default = "default_stt_model")]
     pub stt_model: String,
     /// Dictation key — see hotkey::KEYS. Fn by default.
@@ -135,8 +135,24 @@ pub fn persisted_backend() -> String {
         .unwrap_or_else(default_backend)
 }
 
+/// Fastest engine by default (Parakeet, MLX → Apple Silicon only). Intel Macs
+/// keep Whisper small. An `stt_model` already saved in settings.json always wins.
 fn default_stt_model() -> String {
-    "whisper-small".into()
+    default_stt_model_for(cfg!(target_arch = "aarch64")).into()
+}
+
+fn default_stt_model_for(apple_silicon: bool) -> &'static str {
+    if apple_silicon { "parakeet-v3" } else { "whisper-small" }
+}
+
+/// The STT engine the user picked (settings.json), or the default.
+pub fn persisted_stt_model() -> String {
+    std::fs::read_to_string(settings_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get("stt_model").and_then(|m| m.as_str()).map(String::from))
+        .filter(|m| setup::STT_MODELS.iter().any(|(id, _, _)| id == m))
+        .unwrap_or_else(default_stt_model)
 }
 fn default_dictation_key() -> String {
     "fn".into()
@@ -2238,6 +2254,13 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_stt_is_the_fast_engine_on_apple_silicon() {
+        assert_eq!(default_stt_model_for(true), "parakeet-v3");
+        assert_eq!(default_stt_model_for(false), "whisper-small");
+        assert!(setup::STT_MODELS.iter().any(|(id, _, _)| *id == default_stt_model()));
+    }
 
     #[test]
     fn settings_window_is_a_distinct_page() {

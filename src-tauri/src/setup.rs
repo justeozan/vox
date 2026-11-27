@@ -1,4 +1,4 @@
-//! First-run setup: probe the local speech stack (Python, venv, Whisper,
+//! First-run setup: probe the local speech stack (Python, venv, STT engine,
 //! Kokoro, Piper, voices) and auto-install what's missing into `~/.vox/venv`
 //! with progress streamed to the renderer. No separate install script needed.
 //!
@@ -30,7 +30,7 @@ pub const QWEN_MODEL_ID: &str = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-4
 pub fn qwen_python() -> PathBuf {
     home().join(QWEN_VENV_DIR).join("bin/python")
 }
-const PIP_DEPS: &[&str] = &["openai-whisper", "numpy", "soundfile", "kokoro", "piper-tts", "num2words"];
+const PIP_DEPS: &[&str] = &["parakeet-mlx", "numpy", "soundfile", "kokoro", "piper-tts", "num2words"];
 const PIPER_BASE: &str = "fr_FR-siwis-medium";
 const PIPER_URL: &str = "https://huggingface.co/rhasspy/piper-voices/resolve/main/fr/fr_FR/siwis/medium/fr_FR-siwis-medium.onnx";
 
@@ -134,7 +134,9 @@ pub fn probe() -> Value {
     let h = home();
     let venv_py = venv_python();
     let has_venv = is_executable(&venv_py);
-    let whisper = has_venv && venv_has(&venv_py, "whisper");
+    let stt_id = crate::persisted_stt_model();
+    let stt_mod = stt_spec(&stt_id).map(|s| s.0).unwrap_or("parakeet_mlx");
+    let whisper = has_venv && venv_has(&venv_py, stt_mod);
     let kokoro = has_venv && venv_has(&venv_py, "kokoro");
     let piper = has_venv && venv_has(&venv_py, "piper");
     let py = find_python();
@@ -158,7 +160,7 @@ pub fn probe() -> Value {
             "espeakNg": comp(espeak, if espeak { need("ok") } else { need("brew install espeak-ng") }),
             "ollama": comp(ollama, if ollama { need("ok") } else { need("brew install ollama") }),
             "venv": comp(has_venv, venv_py.display().to_string()),
-            "whisper": comp(whisper, need("openai-whisper")),
+            "whisper": comp(whisper, need(stt_spec(&stt_id).map(|s| s.1).unwrap_or("parakeet-mlx"))),
             "kokoro": comp(kokoro, need("kokoro")),
             "piper": comp(piper, need("piper-tts")),
             "piperVoice": comp(voice.exists(), voice.display().to_string()),
@@ -273,7 +275,7 @@ fn download(app: &AppHandle, url: &str, dest: &Path) -> Result<(), String> {
 
 // ── Run setup ────────────────────────────────────────────────────────────────
 
-/// Create `~/.vox/venv`, pip-install Whisper/Kokoro/Piper, and fetch the Piper
+/// Create `~/.vox/venv`, pip-install Parakeet/Kokoro/Piper, and fetch the Piper
 /// French voice model. Idempotent — safe to re-run; missing pieces only.
 /// Streams progress to the renderer through `setup-log` events.
 pub fn run_setup(app: &AppHandle, _state: &Arc<AppState>) -> Result<Value, String> {
@@ -328,7 +330,7 @@ pub fn run_setup(app: &AppHandle, _state: &Arc<AppState>) -> Result<Value, Strin
         e
     })?;
 
-    emit_log(app, "setup", "Installation de Whisper, Kokoro et Piper (quelques minutes)…");
+    emit_log(app, "setup", "Installation de Parakeet, Kokoro et Piper (quelques minutes)…");
     run_quiet(
         &venv_py,
         &[
@@ -352,7 +354,7 @@ pub fn run_setup(app: &AppHandle, _state: &Arc<AppState>) -> Result<Value, Strin
     })?;
 
     // Piper French voice (the .onnx + sidecar config). Kokoro pulls its own
-    // voices on first load; Whisper downloads its model on first daemon start.
+    // voices on first load; the STT model is downloaded on first daemon start.
     let voices = vox.join("voices");
     std::fs::create_dir_all(&voices).map_err(|e| e.to_string())?;
     let onnx = voices.join(format!("{PIPER_BASE}.onnx"));
@@ -441,13 +443,13 @@ pub fn install_qwen(app: &AppHandle) -> Result<Value, String> {
 /// (id, label, detail) for every STT engine `vox_stt.py` can run
 /// (`VOX_STT_MODEL`). Sizes are the on-disk download.
 pub const STT_MODELS: &[(&str, &str, &str)] = &[
-    ("whisper-small", "Whisper small", "rapide · ~0,5 Go"),
+    ("parakeet-v3", "Parakeet v3", "défaut · très rapide · ~2,3 Go"),
     ("whisper-large-v3-turbo", "Whisper large-v3 turbo", "précis · ~1,5 Go"),
-    ("parakeet-v3", "Parakeet v3", "très rapide · ~2,3 Go"),
+    ("whisper-small", "Whisper small", "léger · ~0,5 Go"),
 ];
 
 /// (python module, pip package, python snippet that loads/downloads the weights)
-fn stt_spec(id: &str) -> Option<(&'static str, &'static str, &'static str)> {
+pub(crate) fn stt_spec(id: &str) -> Option<(&'static str, &'static str, &'static str)> {
     match id {
         "whisper-small" => Some(("whisper", "openai-whisper",
             "import whisper; whisper.load_model('small'); print('loaded')")),
@@ -506,4 +508,24 @@ pub fn install_stt(app: &AppHandle, id: &str) -> Result<Value, String> {
 
     emit_log(app, "stt", &format!("{id} prêt ✓"));
     Ok(json!({ "ok": true, "model": id }))
+}
+
+#[cfg(test)]
+mod stt_tests {
+    use super::*;
+
+    #[test]
+    fn stt_spec_covers_every_listed_model() {
+        for (id, _, _) in STT_MODELS {
+            assert!(stt_spec(id).is_some(), "{id}");
+        }
+        assert!(stt_spec("nope").is_none());
+    }
+
+    #[test]
+    fn default_install_has_parakeet_not_openai_whisper() {
+        assert!(PIP_DEPS.contains(&"parakeet-mlx"));
+        assert!(!PIP_DEPS.contains(&"openai-whisper"));
+        assert_eq!(stt_spec("parakeet-v3").unwrap().0, "parakeet_mlx");
+    }
 }
