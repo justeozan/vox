@@ -11,6 +11,13 @@
   that opens the Accessibility pane.
 
 ### Added
+- **Quick reply to a blocked agent.** Right after Vox announces that an agent is
+  waiting on you (or errored), a bare "oui vas-y", "non" or "fais plutôt X" (FR/EN)
+  goes to that agent's worktree without naming the project, for 90 s and once.
+  Decided by rules, not by the model; a phrase naming another project or a real
+  command is never captured. The answer starts a new agent session in the same
+  worktree (the regular launch path) whose prompt includes the agent's question;
+  Vox never types into an existing terminal, which could be a shell.
 - **Settings in their own window (⌘,).** The pill is now a small 240×40 bar with no
   gear and no settings panel; the recap button appears on hover. ⌘, (app menu)
   and the tray's *Settings…* open a separate window (singleton, Esc / ⌘W close

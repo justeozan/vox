@@ -679,7 +679,63 @@ fn looks_like_inline_tool(s: &str) -> bool {
 /// model's answers over a long session, then starts costing real latency.
 const MAX_HISTORY: usize = 24;
 
+/// Answer a blocked agent without naming it: "oui vas-y", "non", "fais plutôt X"
+/// right after Vox announced the block. Deterministic — no model call decides.
+/// Returns true when the turn was handled.
+///
+/// The answer starts a new agent session in the blocked worktree through the
+/// regular launch path (`agents::launch`), its prompt carrying the question the
+/// agent was blocked on. Vox deliberately does not type into an existing Orca
+/// terminal: the worktree may hold a shell or dev server, and the text comes
+/// from speech recognition.
+fn try_quick_reply(app: &AppHandle, state: &Arc<AppState>, transcript: &str) -> bool {
+    use crate::quick_reply as qr;
+    use crate::targets::{self, Resolution};
+    // Names of every OTHER project: naming one means the user moved on.
+    let others: Vec<String> = crate::workspace::catalog()
+        .into_iter()
+        .flat_map(|c| [c.name, c.repo])
+        .collect();
+    let pending_project = match qr::peek(&state.quick_reply, crate::now_unix()) {
+        Some(p) => p.project,
+        None => return false,
+    };
+    let others: Vec<String> =
+        others.into_iter().filter(|n| !n.eq_ignore_ascii_case(&pending_project)).collect();
+    let Some((pending, reply)) = qr::route(&state.quick_reply, transcript, &others, crate::now_unix()) else {
+        return false;
+    };
+    let en = state.settings.lock().unwrap().language == "en";
+    let say = match targets::resolve_target(state, &pending.project) {
+        Resolution::Found(t) => {
+            println!("[vox] quick reply → {} ({})", t.label, t.path);
+            let prompt = qr::context_prompt(&pending.question, &reply, en);
+            match crate::agents::launch(app, state, &t, &prompt) {
+                Ok(_) if en => format!("Sent to {}.", t.label),
+                Ok(_) => format!("C'est envoyé à {}.", t.label),
+                Err(e) => launch_error_line(en, &e, &t.label),
+            }
+        }
+        Resolution::Ambiguous { options, .. } => targets::ask_which(en, &options),
+        Resolution::Unknown { needle } => targets::unknown_line(en, &needle),
+    };
+    {
+        let mut h = state.history.lock().unwrap();
+        h.push(json!({ "role": "user", "content": transcript }));
+        h.push(json!({ "role": "assistant", "content": say }));
+        if h.len() > MAX_HISTORY {
+            let drop = h.len() - MAX_HISTORY;
+            h.drain(..drop);
+        }
+    }
+    speech::speak(app, state, &say);
+    true
+}
+
 pub fn ask_ollama(app: &AppHandle, state: &Arc<AppState>, transcript: &str) {
+    if try_quick_reply(app, state, transcript) {
+        return;
+    }
     {
         let mut h = state.history.lock().unwrap();
         h.push(json!({ "role": "user", "content": transcript }));
