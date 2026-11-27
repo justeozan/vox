@@ -1111,8 +1111,22 @@ fn accessibility_status() -> bool {
 }
 
 #[tauri::command]
-fn request_accessibility() -> bool {
-    dictation::accessibility_trusted(true)
+async fn request_accessibility() -> bool {
+    tauri::async_runtime::spawn_blocking(|| {
+        if dictation::accessibility_trusted(true) {
+            return true;
+        }
+        // Re-check for up to ~2 s: the grant may land just after the prompt.
+        for _ in 0..8 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            if dictation::accessibility_trusted(false) {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false)
 }
 
 #[tauri::command]

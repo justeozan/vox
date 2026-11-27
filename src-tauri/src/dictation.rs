@@ -297,7 +297,7 @@ fn process(app: &AppHandle, state: &Arc<AppState>, samples: &[f32]) {
     SESSION.lock().unwrap().last_text = Some(text.trim().to_string());
     append_history(&ctx, &raw, &text, was_formatted);
 
-    if !accessibility_trusted(true) {
+    if delivery_for(accessibility_trusted(false)) == Delivery::ClipboardOnly {
         // No Accessibility → no synthetic ⌘V. Leave it on the clipboard instead
         // of losing it.
         set_clipboard_text(&text);
@@ -305,10 +305,7 @@ fn process(app: &AppHandle, state: &Arc<AppState>, samples: &[f32]) {
             app,
             false,
             &text,
-            Some(msg(
-                "Allow Vox in Accessibility to type — copied to the clipboard meanwhile.",
-                "Autorise Vox dans Accessibilité pour écrire — copié dans le presse-papiers.",
-            )),
+            Some(msg(DENIED_MSG.1, DENIED_MSG.0)),
         );
     }
     paste(app, &text);
@@ -360,6 +357,73 @@ fn strip_hesitations(text: &str) -> String {
     match chars.next() {
         Some(c) if was_upper && c.is_lowercase() => format!("{}{}{}", &out[..lead], c.to_uppercase(), chars.as_str()),
         _ => out,
+    }
+}
+
+/// Toast shown when Accessibility is missing: (FR, EN). Says what to do, since a
+/// reinstall / new signature leaves a stale (checked but invalid) entry.
+const DENIED_MSG: (&str, &str) = (
+    "Accessibilité non accordée — copié dans le presse-papiers. Retire puis remets Vox dans Réglages Système → Confidentialité et sécurité → Accessibilité.",
+    "Accessibility not granted — copied to the clipboard. Remove and re-add Vox in System Settings → Privacy & Security → Accessibility.",
+);
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Delivery {
+    Paste,
+    ClipboardOnly,
+}
+
+/// Without Accessibility there is no synthetic ⌘V: keep the text on the clipboard.
+fn delivery_for(trusted: bool) -> Delivery {
+    if trusted { Delivery::Paste } else { Delivery::ClipboardOnly }
+}
+
+/// Combine the two Accessibility probes. `AXIsProcessTrusted` can lag behind a
+/// fresh grant, so when it says no, a second non-intrusive probe (`tap`, run
+/// lazily) gets the last word. Returns (trusted, tap result if it was run).
+/// Neither probe ever prompts.
+pub fn resolve_trust(ax_trusted: bool, tap: impl FnOnce() -> bool) -> (bool, Option<bool>) {
+    if ax_trusted {
+        return (true, None);
+    }
+    let t = tap();
+    (t, Some(t))
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+
+    #[test]
+    fn ax_trusted_skips_the_tap_probe() {
+        let (ok, tap) = resolve_trust(true, || panic!("tap must not run"));
+        assert!(ok);
+        assert_eq!(tap, None);
+    }
+
+    #[test]
+    fn stale_ax_but_tap_ok_is_trusted() {
+        assert_eq!(resolve_trust(false, || true), (true, Some(true)));
+    }
+
+    #[test]
+    fn both_failing_is_untrusted() {
+        assert_eq!(resolve_trust(false, || false), (false, Some(false)));
+    }
+
+    #[test]
+    fn missing_permission_keeps_text_on_clipboard() {
+        assert_eq!(delivery_for(false), Delivery::ClipboardOnly);
+        assert_eq!(delivery_for(true), Delivery::Paste);
+    }
+
+    #[test]
+    fn denied_message_explains_the_fix_in_both_languages() {
+        for m in [DENIED_MSG.0, DENIED_MSG.1] {
+            assert!(m.contains("Accessib"));
+            assert!(m.contains("Vox"));
+            assert!(m.contains("→"));
+        }
     }
 }
 
@@ -703,9 +767,49 @@ mod mac {
         }
     }
 
+    extern "C" fn probe_cb(_p: *mut c_void, _t: u32, ev: *mut c_void, _u: *mut c_void) -> *mut c_void {
+        ev
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventTapCreate(
+            tap: u32,
+            place: u32,
+            options: u32,
+            mask: u64,
+            cb: extern "C" fn(*mut c_void, u32, *mut c_void, *mut c_void) -> *mut c_void,
+            user: *mut c_void,
+        ) -> CFTypeRef;
+    }
+
+    /// Non-intrusive probe: an active tap can only be created when Accessibility
+    /// is effectively granted. It is never attached to a run loop and is
+    /// released at once, so it neither fires nor conflicts with hotkey.rs.
+    fn tap_probe() -> bool {
+        unsafe {
+            let mask: u64 = 1 << 12; // flagsChanged
+            let tap = CGEventTapCreate(1, 0, 0, mask, probe_cb, std::ptr::null_mut());
+            if tap.is_null() {
+                return false;
+            }
+            CFRelease(tap);
+            true
+        }
+    }
+
+    static LAST_PROBE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
     pub fn trusted(prompt: bool) -> bool {
         unsafe {
-            if AXIsProcessTrusted() != 0 {
+            let ax = AXIsProcessTrusted() != 0;
+            let (ok, tap) = super::resolve_trust(ax, tap_probe);
+            // Log only on change: this is polled while the settings panel is open.
+            let code = (ax as u8) | (tap.unwrap_or(false) as u8) << 1 | 4;
+            if LAST_PROBE.swap(code, std::sync::atomic::Ordering::Relaxed) != code {
+                println!("[vox] accessibility probes: AXIsProcessTrusted={ax} eventTap={tap:?}");
+            }
+            if ok {
                 return true;
             }
             if prompt {
