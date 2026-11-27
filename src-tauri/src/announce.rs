@@ -511,6 +511,10 @@ fn speak_batch(
         let _ = app.emit("speaking-done", ());
     }
     let _ = app.emit("announce-done", json!({ "spoken": started, "completed": completed }));
+    // Armed only once the block was really said out loud: an interrupted batch
+    // is parked and re-announced later, and "oui" must not answer a question
+    // the user never heard.
+    crate::quick_reply::arm(&state.quick_reply, batch, completed, now_unix());
     completed
 }
 

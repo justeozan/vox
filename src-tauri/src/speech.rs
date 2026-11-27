@@ -141,11 +141,12 @@ pub fn transcribe_with_prompt(state: &Arc<AppState>, wav: &Path, prompt: Option<
         let mut guard = state.stt.lock().unwrap();
         if let Some(d) = guard.as_mut() {
             if d.is_ready() {
+                let t0 = std::time::Instant::now();
                 if let Some(line) = d.request(&line, Duration::from_secs(60)) {
                     if line == "EMPTY" || line.starts_with("ERROR:") {
                         return String::new();
                     }
-                    println!("[vox] transcript (daemon): {line}");
+                    println!("[vox] transcript (daemon, {} ms): {line}", t0.elapsed().as_millis());
                     return line;
                 }
             }

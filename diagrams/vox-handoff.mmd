@@ -11,7 +11,7 @@ graph TD
         F --> G["write WAV temp file"]
         G --> H{"STT daemon<br/>prêt ?"}
         H -->|oui| I["daemon.request<br/>stdin line → stdout result"]
-        H -->|non| J["whisper CLI fallback<br/>whisper --model small"]
+        H -->|non| J["whisper CLI fallback<br/>(optionnel)"]
         I --> K["emit transcript<br/>lettre par lettre"]
         J --> K
         K --> L["llm::ask_ollama<br/>Ollama /v1/chat/completions"]
