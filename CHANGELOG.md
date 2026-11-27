@@ -11,6 +11,19 @@
   that opens the Accessibility pane.
 
 ### Added
+- **Orca/Conductor names are injected into speech recognition.** Repo names,
+  worktree codenames and branches (from whichever backend `workspace::catalog()`
+  reads: Orca, else Conductor) prime Whisper (assistant voice path and
+  dictation, next to the user's own words). On voice commands only, a strict
+  post-STT pass corrects near-misses of repo names and codenames ("findi" →
+  "findy"; never branches, user words or free-prose dictation), which also helps
+  engines that ignore the prompt. Each such correction is offered in Settings → Vocabulary as a
+  suggestion ("Keep findi → findy ✓ / ✕"); only an accepted one is written to
+  `vocabulary.json` (as a replacement). Auto-injected names themselves are never
+  persisted. With no catalog available the daemon keeps its default prompt.
+  Pending suggestions live in memory (lost on restart). Learning from the
+  user's manual edits in other apps is not possible (the app cannot see the
+  edited text); suggestions come from detected corrections, validated by the user.
 - **Settings in their own window (⌘,).** The pill is now a small 240×40 bar with no
   gear and no settings panel; the recap button appears on hover. ⌘, (app menu)
   and the tray's *Settings…* open a separate window (singleton, Esc / ⌘W close

@@ -23,6 +23,7 @@ pub mod orca;
 pub mod setup;
 pub mod speech;
 pub mod targets;
+pub mod vocab;
 pub mod watch;
 pub mod workspace;
 
@@ -1040,7 +1041,15 @@ async fn voice_input(
             return;
         }
 
-        let transcript = speech::transcribe(&st, &tmp);
+        // Prime Whisper with the Orca names (empty catalog when Orca is
+        // unavailable → default prompt) and fix near-misses afterwards.
+        let fr = st.settings.lock().unwrap().language.starts_with("fr");
+        let cands = workspace::catalog();
+        let names = vocab::catalog_terms(&cands);
+        let prompt = vocab::assistant_prompt(fr, &names);
+        let transcript = speech::transcribe_with_prompt(&st, &tmp, prompt.as_deref());
+        let (transcript, changes) = vocab::correct_with_changes(&transcript, &vocab::fuzzy_terms(&cands));
+        suggest_from_changes(&changes);
         let _ = std::fs::remove_file(&tmp);
 
         if transcript.is_empty() {
@@ -1132,6 +1141,36 @@ async fn request_accessibility() -> bool {
 #[tauri::command]
 fn fn_key_status() -> Value {
     json!({ "globe_does_nothing": hotkey::globe_does_nothing() })
+}
+
+/// Queue near-miss corrections so Settings can offer to keep them (never
+/// written without the user's validation).
+fn suggest_from_changes(changes: &[(String, String)]) {
+    if changes.is_empty() {
+        return;
+    }
+    let known: Vec<(String, String)> =
+        dictation::load_vocabulary().replacements.into_iter().map(|r| (r.from, r.to)).collect();
+    vocab::queue_suggestions(changes, &known);
+}
+
+#[tauri::command]
+fn get_vocab_suggestions() -> Vec<(String, String)> {
+    vocab::pending_suggestions()
+}
+
+/// Accept (adds `from => to` to vocabulary.json) or dismiss a suggestion.
+#[tauri::command]
+fn resolve_vocab_suggestion(from: String, accept: bool) -> Result<(), String> {
+    let Some((from, to)) = vocab::take_suggestion(&from) else { return Ok(()) };
+    if accept {
+        let mut v = dictation::load_vocabulary();
+        if !v.replacements.iter().any(|r| r.from.eq_ignore_ascii_case(&from)) {
+            v.replacements.push(dictation::Replacement { from, to });
+            dictation::save_vocabulary(v)?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1763,6 +1802,8 @@ pub fn run() {
             fn_key_status,
             get_vocabulary,
             set_vocabulary,
+            get_vocab_suggestions,
+            resolve_vocab_suggestion,
             audio_done,
             set_pill_frame,
             rerun_setup,
