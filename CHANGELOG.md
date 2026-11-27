@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Changed
+- **Faster speech-to-text by default.** The STT daemon now defaults to Parakeet v3
+  (MLX) instead of `openai-whisper`; a fresh install no longer pulls
+  `openai-whisper` (and its torch dependency) nor needs ffmpeg for STT. A model
+  already chosen in settings is kept. If the chosen engine is not installed
+  (e.g. an existing venv with only `openai-whisper`), the daemon falls back to
+  Whisper small instead of crashing; Intel Macs default to Whisper small. The
+  transcription time is now logged (`[vox] transcript (daemon, N ms)`) so the
+  before/after can be measured on your machine. Parakeet ignores the vocabulary
+  prompt: dictation relies on the vocabulary replacements for those terms.
+
 ### Fixed
 - **Dictation no longer reports "Accessibility not granted" when it is.** The
   check now combines `AXIsProcessTrusted` with a non-intrusive event-tap probe
@@ -24,6 +35,13 @@
   Pending suggestions live in memory (lost on restart). Learning from the
   user's manual edits in other apps is not possible (the app cannot see the
   edited text); suggestions come from detected corrections, validated by the user.
+- **Quick reply to a blocked agent.** Right after Vox announces that an agent is
+  waiting on you (or errored), a bare "oui vas-y", "non" or "fais plutôt X" (FR/EN)
+  goes to that agent's worktree without naming the project, for 90 s and once.
+  Decided by rules, not by the model; a phrase naming another project or a real
+  command is never captured. The answer starts a new agent session in the same
+  worktree (the regular launch path) whose prompt includes the agent's question;
+  Vox never types into an existing terminal, which could be a shell.
 - **Settings in their own window (⌘,).** The pill is now a small 240×40 bar with no
   gear and no settings panel; the recap button appears on hover. ⌘, (app menu)
   and the tray's *Settings…* open a separate window (singleton, Esc / ⌘W close

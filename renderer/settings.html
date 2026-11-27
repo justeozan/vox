@@ -361,7 +361,7 @@ function setText(id, txt) { const el = document.getElementById(id); if (el) el.t
 
 function renderSttOptions() {
   const L = LABEL_TABLE[uiLang] || LABEL_TABLE.fr
-  const cur = sttSelect.value || curSettings.stt_model || 'whisper-small'
+  const cur = sttSelect.value || curSettings.stt_model || 'parakeet-v3'
   sttSelect.innerHTML = ''
   const list = sttModels.length ? sttModels : [{ id: cur, label: cur, installed: true }]
   for (const m of list) {
@@ -589,7 +589,7 @@ async function fillControls() {
   uiLang = s.language || 'fr'
   dictKeySelect.value = s.dictation_key || 'fn'
   dictFormatSelect.value = s.dictation_format || 'llm'
-  sttSelect.value = s.stt_model || 'whisper-small'
+  sttSelect.value = s.stt_model || 'parakeet-v3'
   applyUiLang()
   renderProviderOptions(s.provider || 'ollama')
   await reloadModels(s.provider || 'ollama', s.model)
@@ -740,7 +740,7 @@ function setSttProgress(text, cls) {
 }
 sttSelect.addEventListener('change', async () => {
   const id = sttSelect.value
-  const prev = curSettings.stt_model || 'whisper-small'
+  const prev = curSettings.stt_model || 'parakeet-v3'
   const m = sttModels.find(x => x.id === id)
   if (!m || m.installed) {
     setSttProgress('')

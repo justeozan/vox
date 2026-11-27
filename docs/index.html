@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Vox — Voice orchestrator for your coding agents</title>
-<meta name="description" content="Vox is a macOS floating voice pill that briefs you on every Orca worktree, drafts prompts by voice, and runs 100% locally — Whisper, Ollama, Kokoro/Piper. No cloud calls.">
+<meta name="description" content="Vox is a macOS floating voice pill that briefs you on every Orca worktree, drafts prompts by voice, and runs 100% locally — Parakeet, Ollama, Kokoro/Piper. No cloud calls.">
 <meta property="og:title" content="Vox — Voice orchestrator for your coding agents">
 <meta property="og:description" content="A floating pill that watches your Orca worktrees, briefs you out loud, and launches the next agent. 100% local. macOS 12+, Apple Silicon, MIT.">
 <meta property="og:type" content="website">
@@ -620,7 +620,7 @@
         <div class="card">
           <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
           <h3>100% local</h3>
-          <p>Whisper, Ollama, Kokoro/Piper — everything runs on your Mac. No API keys, no cloud calls, nothing leaves your machine.</p>
+          <p>Parakeet, Ollama, Kokoro/Piper — everything runs on your Mac. No API keys, no cloud calls, nothing leaves your machine.</p>
         </div>
       </div>
     </div>
@@ -636,7 +636,7 @@
           <p class="lead">No accounts, no telemetry, no API keys to paste in. Vox runs a small local stack and talks to Ollama on localhost — that's the entire network surface.</p>
         </div>
         <div class="stack-list">
-          <div class="stack-row"><span class="stack-role">Speech-to-text</span><span class="stack-name">Whisper (local Python daemon)</span></div>
+          <div class="stack-row"><span class="stack-role">Speech-to-text</span><span class="stack-name">Parakeet (MLX, local Python daemon)</span></div>
           <div class="stack-row"><span class="stack-role">Reasoning</span><span class="stack-name">Ollama — any model, default qwen2.5:3b</span></div>
           <div class="stack-row"><span class="stack-role">Voice — English</span><span class="stack-name">Kokoro TTS</span></div>
           <div class="stack-row"><span class="stack-role">Voice — French</span><span class="stack-name">Piper TTS</span></div>
@@ -663,7 +663,7 @@
         <div class="step">
           <div class="step-num">2</div>
           <h3>First launch</h3>
-          <p>Vox detects what's missing and <strong>auto-installs the local speech stack</strong> (Whisper, Kokoro, Piper) into <code>~/.vox/venv</code> — a panel shows the progress. Just Python 3.11+ and an internet connection.</p>
+          <p>Vox detects what's missing and <strong>auto-installs the local speech stack</strong> (Parakeet, Kokoro, Piper) into <code>~/.vox/venv</code> — a panel shows the progress. Just Python 3.11+ and an internet connection.</p>
           <div class="step-note">Config lives in <code>~/.vox/settings.json</code> and <code>~/.vox/projects.json</code>.</div>
         </div>
         <div class="step">
