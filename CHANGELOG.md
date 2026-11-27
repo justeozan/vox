@@ -22,6 +22,10 @@
   that opens the Accessibility pane.
 
 ### Added
+- **Voice commands on selected text.** Select text, hold the dictation key and say
+  "rends ça plus poli", "translate to English", "raccourcis": the brain edits the
+  selection and ⌘V replaces it. No selection → normal dictation. On any failure the
+  selection is left untouched.
 - **Quick reply to a blocked agent.** Right after Vox announces that an agent is
   waiting on you (or errored), a bare "oui vas-y", "non" or "fais plutôt X" (FR/EN)
   goes to that agent's worktree without naming the project, for 90 s and once.
