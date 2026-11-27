@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Vox STT daemon — local speech-to-text, three selectable engines (VOX_STT_MODEL):
-  whisper-small           openai-whisper "small" (default; cached in ~/.cache/whisper/)
+  parakeet-v3             parakeet-mlx, mlx-community/parakeet-tdt-0.6b-v3 (default; multilingual)
   whisper-large-v3-turbo  mlx-whisper, mlx-community/whisper-large-v3-turbo
-  parakeet-v3             parakeet-mlx, mlx-community/parakeet-tdt-0.6b-v3 (multilingual)
+  whisper-small           openai-whisper "small" (fallback when the chosen engine is missing)
 Protocol:
   IN:  <wav_path>[\t<initial_prompt>]\n
   OUT: <transcript>\n   on success
@@ -22,10 +22,10 @@ import soundfile as sf
 
 SAMPLE_RATE = 16000
 KNOWN_MODELS = ("whisper-small", "whisper-large-v3-turbo", "parakeet-v3")
-MODEL_NAME = os.environ.get("VOX_STT_MODEL", "whisper-small").strip() or "whisper-small"
+MODEL_NAME = os.environ.get("VOX_STT_MODEL", "parakeet-v3").strip() or "parakeet-v3"
 if MODEL_NAME not in KNOWN_MODELS:
-    print(f"vox_stt: unknown model '{MODEL_NAME}', falling back to whisper-small", file=sys.stderr, flush=True)
-    MODEL_NAME = "whisper-small"
+    print(f"vox_stt: unknown model '{MODEL_NAME}', falling back to parakeet-v3", file=sys.stderr, flush=True)
+    MODEL_NAME = "parakeet-v3"
 LANG       = os.environ.get("VOX_STT_LANG",  "fr")
 
 def load_audio(path: str) -> np.ndarray:
@@ -82,8 +82,9 @@ WHISPER_KW = dict(
     compression_ratio_threshold=2.4,
 )
 
-try:
-    if MODEL_NAME == "whisper-small":
+def load_engine(name):
+    """Load + warm one engine; returns transcribe(audio, prompt). ImportError if not installed."""
+    if name == "whisper-small":
         import whisper
         model = whisper.load_model("small")
 
@@ -95,7 +96,7 @@ try:
             r = model.transcribe(audio, fp16=False, initial_prompt=prompt, **WHISPER_KW)
             return r.get("text", "")
 
-    elif MODEL_NAME == "whisper-large-v3-turbo":
+    elif name == "whisper-large-v3-turbo":
         import mlx_whisper
         from mlx_whisper.transcribe import ModelHolder
         import mlx.core as mx
@@ -114,7 +115,8 @@ try:
         model = from_pretrained("mlx-community/parakeet-tdt-0.6b-v3")
 
         def transcribe(audio, prompt):
-            # Language is auto-detected and there is no prompt support: ignored.
+            # Language is auto-detected and there is no prompt support: ignored
+            # (dictation relies on the vocabulary replacements / LLM cleanup).
             # Feed the array directly (parakeet's own loader shells out to ffmpeg).
             # The log-mel must be computed in float32 (its bf16 path breaks with
             # recent mlx); only the resulting features are cast to bf16.
@@ -126,27 +128,58 @@ try:
 
     # Warm-up: compile kernels / allocate buffers so the first real request is fast.
     transcribe(np.zeros(SAMPLE_RATE // 2, dtype=np.float32), INITIAL_PROMPT)
-except ImportError as e:
-    print(f"ERROR:{MODEL_NAME} not installed ({e})", flush=True)
-    sys.exit(1)
-except Exception as e:
-    print(f"ERROR:failed to load model: {e}", flush=True)
-    sys.exit(1)
+    return transcribe
 
-print("ready", flush=True)
+def engine_order(name):
+    """The wanted engine first, then whisper-small as the safe fallback."""
+    return [name] if name == "whisper-small" else [name, "whisper-small"]
 
-for line in sys.stdin:
-    # "path" or "path<TAB>initial prompt" (dictation primes Whisper with the
-    # user's vocabulary instead of the assistant's default prompt).
-    wav_path, _, custom_prompt = line.rstrip("\r\n").partition("\t")
-    wav_path = wav_path.strip()
-    if not wav_path:
-        continue
+def resolve_engine(name, loader=load_engine):
+    """First engine of engine_order(name) that is installed. A missing package
+    (ImportError) falls back instead of crashing, e.g. an existing user whose
+    venv only has openai-whisper. Returns (engine_name, transcribe).
+    Raises ImportError if none of them can be imported."""
+    last = None
+    for candidate in engine_order(name):
+        try:
+            return candidate, loader(candidate)
+        except ImportError as e:
+            last = e
+            print(f"vox_stt: {candidate} not installed ({e})", file=sys.stderr, flush=True)
+    raise last
+
+def main():
     try:
-        transcript = transcribe(load_audio(wav_path), custom_prompt.strip() or INITIAL_PROMPT).strip()
-        if is_hallucination(transcript):
-            print("EMPTY", flush=True)
-        else:
-            print(transcript if transcript else "EMPTY", flush=True)
+        engine, transcribe = resolve_engine(MODEL_NAME)
+        if engine != MODEL_NAME:
+            print(f"vox_stt: using {engine} instead of {MODEL_NAME}", file=sys.stderr, flush=True)
+    except ImportError as e:
+        print(f"ERROR:{MODEL_NAME} not installed ({e})", flush=True)
+        sys.exit(1)
     except Exception as e:
-        print(f"ERROR:{e}", flush=True)
+        print(f"ERROR:failed to load model: {e}", flush=True)
+        sys.exit(1)
+
+    serve(transcribe)
+
+def serve(transcribe):
+    print("ready", flush=True)
+
+    for line in sys.stdin:
+        # "path" or "path<TAB>initial prompt" (dictation primes Whisper with the
+        # user's vocabulary instead of the assistant's default prompt).
+        wav_path, _, custom_prompt = line.rstrip("\r\n").partition("\t")
+        wav_path = wav_path.strip()
+        if not wav_path:
+            continue
+        try:
+            transcript = transcribe(load_audio(wav_path), custom_prompt.strip() or INITIAL_PROMPT).strip()
+            if is_hallucination(transcript):
+                print("EMPTY", flush=True)
+            else:
+                print(transcript if transcript else "EMPTY", flush=True)
+        except Exception as e:
+            print(f"ERROR:{e}", flush=True)
+
+if __name__ == "__main__":
+    main()

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Vox setup script — creates ~/.vox/venv and installs the local STT/TTS deps
-# (Whisper, Kokoro, Piper). No cloud calls, everything runs on your machine.
+# (Parakeet, Kokoro, Piper). No cloud calls, everything runs on your machine.
 #
 # Safe to re-run: it only creates the venv if missing and pip install is
 # idempotent.
@@ -45,11 +45,7 @@ if ! PYTHON_BIN="$(find_python)"; then
 fi
 log "Using $PYTHON_BIN ($($PYTHON_BIN --version))"
 
-# ── ffmpeg check (Whisper decodes/resamples audio through it) ──────────────
-if ! command -v ffmpeg >/dev/null 2>&1; then
-    warn "ffmpeg not found — Whisper STT needs it to read audio."
-    warn "Install it with: brew install ffmpeg"
-fi
+# (ffmpeg is not required: vox_stt.py reads audio with soundfile.)
 
 # ── espeak-ng check (Kokoro's French voice phonemizes through it) ──────────
 if ! command -v espeak-ng >/dev/null 2>&1; then
@@ -82,12 +78,12 @@ log "Upgrading pip"
 "$VENV_PY" -m pip install --upgrade pip --quiet
 
 # ── Install the exact deps the resource scripts import ──────────────────────
-# vox_stt.py:        whisper                -> openai-whisper
+# vox_stt.py:        parakeet_mlx, numpy, soundfile -> parakeet-mlx
 # vox_tts.py:         numpy, soundfile, kokoro, (num2words)
 # vox_tts_piper.py:   piper, piper.config    -> piper-tts, (num2words)
 log "Installing Python dependencies (this can take a few minutes on first run)"
 "$VENV_PIP" install --quiet \
-    openai-whisper \
+    parakeet-mlx \
     numpy \
     soundfile \
     kokoro \

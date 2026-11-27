@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Changed
+- **Faster speech-to-text by default.** The STT daemon now defaults to Parakeet v3
+  (MLX) instead of `openai-whisper`; a fresh install no longer pulls
+  `openai-whisper` (and its torch dependency) nor needs ffmpeg for STT. A model
+  already chosen in settings is kept. If the chosen engine is not installed
+  (e.g. an existing venv with only `openai-whisper`), the daemon falls back to
+  Whisper small instead of crashing; Intel Macs default to Whisper small. The
+  transcription time is now logged (`[vox] transcript (daemon, N ms)`) so the
+  before/after can be measured on your machine. Parakeet ignores the vocabulary
+  prompt: dictation relies on the vocabulary replacements for those terms.
+
 ### Fixed
 - **Dictation no longer reports "Accessibility not granted" when it is.** The
   check now combines `AXIsProcessTrusted` with a non-intrusive event-tap probe

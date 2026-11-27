@@ -1,4 +1,4 @@
-//! Python daemon management (whisper STT + Kokoro/Piper TTS) and external tool
+//! Python daemon management (STT + Kokoro/Piper TTS) and external tool
 //! discovery. Both daemons speak a line-based stdin/stdout protocol and print
 //! "ready" once their model is loaded — see resources/vox_stt.py / vox_tts.py / vox_tts_piper.py.
 
@@ -206,6 +206,20 @@ fn python_with_module(candidates: &[PathBuf], module: &str) -> Option<PathBuf> {
     }).cloned()
 }
 
+/// Python modules to probe for STT, the selected engine's first, then the
+/// whisper-small fallback (never duplicated).
+pub(crate) fn stt_module_order(model: &str) -> Vec<&'static str> {
+    let mut v = Vec::new();
+    for id in [model, "whisper-small"] {
+        if let Some((m, _, _)) = crate::setup::stt_spec(id) {
+            if !v.contains(&m) {
+                v.push(m);
+            }
+        }
+    }
+    v
+}
+
 /// Locate a bundled resource script, falling back to the source tree in dev.
 pub fn resource_script(app: &AppHandle, name: &str) -> Option<PathBuf> {
     if let Ok(p) = app
@@ -224,7 +238,7 @@ pub fn resource_script(app: &AppHandle, name: &str) -> Option<PathBuf> {
 }
 
 /// Resolve every external tool once at startup (runs on a background thread —
-/// `import whisper` probing takes seconds).
+/// module probing takes seconds).
 pub fn init_paths(state: &Arc<AppState>, app: &AppHandle) {
     let h = home();
 
@@ -237,7 +251,7 @@ pub fn init_paths(state: &Arc<AppState>, app: &AppHandle) {
     );
     match &whisper_cli {
         Some(p) => println!("[vox] whisper: {}", p.display()),
-        None => eprintln!("[vox] whisper not found — STT CLI fallback unavailable"),
+        None => println!("[vox] whisper CLI not found — optional STT CLI fallback unavailable"),
     }
 
     // STT python: ~/.vox/venv first — it is what setup installs into, and the
@@ -257,10 +271,15 @@ pub fn init_paths(state: &Arc<AppState>, app: &AppHandle) {
             stt_candidates.push(p);
         }
     }
-    let stt_python = python_with_module(&stt_candidates, "whisper");
+    // Probe the chosen engine's module first; the daemon itself falls back to
+    // whisper-small when the engine is missing (see vox_stt.py resolve_engine).
+    let wanted = crate::persisted_stt_model();
+    let stt_python = stt_module_order(&wanted)
+        .iter()
+        .find_map(|m| python_with_module(&stt_candidates, m));
     match &stt_python {
         Some(p) => println!("[vox] stt python: {}", p.display()),
-        None => eprintln!("[vox] no Python with openai-whisper found"),
+        None => eprintln!("[vox] no Python with an STT engine ({wanted}) found"),
     }
 
     // Kokoro python: the ~/.vox/venv is the canonical install.
@@ -475,4 +494,17 @@ pub fn restart_daemons(state: &Arc<AppState>, app: AppHandle) {
     *state.tts.lock().unwrap() = None;
     start_stt(state);
     start_tts(state, app);
+}
+
+#[cfg(test)]
+mod stt_tests {
+    use super::*;
+
+    #[test]
+    fn probes_chosen_engine_then_whisper_small() {
+        assert_eq!(stt_module_order("parakeet-v3"), vec!["parakeet_mlx", "whisper"]);
+        assert_eq!(stt_module_order("whisper-large-v3-turbo"), vec!["mlx_whisper", "whisper"]);
+        assert_eq!(stt_module_order("whisper-small"), vec!["whisper"]);
+        assert_eq!(stt_module_order("inconnu"), vec!["whisper"]);
+    }
 }

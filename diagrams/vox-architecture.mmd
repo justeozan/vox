@@ -16,7 +16,7 @@ graph TD
 
     subgraph BG["BACKGROUND THREAD — lourd"]
         J --> K["ensure_registry\n~/.vox/projects.json"]
-        K --> L["init_paths\nfind: whisper, python3, claude + orca CLI"]
+        K --> L["init_paths\nfind: whisper (optionnel), python3, claude + orca CLI"]
         L --> M["start_stt\npython + vox_stt.py"]
         L --> N["start_tts\npython + vox_tts.py"]
         N -->|daemon ready| O["speak_startup_brief"]
