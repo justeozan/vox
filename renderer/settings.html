@@ -78,6 +78,7 @@
         <div class="setting-warn" id="warn-acc" style="display:none">
           <span id="warn-acc-text"></span>
           <button class="update-btn" id="warn-acc-btn"></button>
+          <button class="update-btn" id="warn-acc-open"></button>
         </div>
         <div class="setting-warn" id="warn-fn" style="display:none">
           <span id="warn-fn-text"></span>
@@ -392,7 +393,7 @@ function renderDictationI18n() {
   setText('lbl-vocab-words', L.vocabWords)
   setText('lbl-vocab-repl', L.vocabRepl)
   setText('reset-all', L.resetAll)
-  setText('warn-acc-text', L.accWarn); setText('warn-acc-btn', L.accBtn)
+  setText('warn-acc-text', L.accWarn); setText('warn-acc-btn', L.accBtn); setText('warn-acc-open', L.accOpen)
   setText('warn-fn-text', L.fnWarn); setText('warn-fn-btn', L.fnBtn)
   for (const b of document.querySelectorAll('.reset-btn')) b.title = L.resetTip
   const ck = dictKeySelect.value || curSettings.dictation_key || 'fn'
@@ -547,6 +548,7 @@ async function saveSettings(patch) {
 // Accessibility / Fn-key warnings at the top of the Dictée group. Re-checked
 // each time the panel opens, when the key changes and when the window regains
 // focus (the user just came back from System Settings).
+let accPoll = null
 async function refreshDictStatus() {
   const accEl = document.getElementById('warn-acc')
   const fnEl = document.getElementById('warn-fn')
@@ -560,12 +562,20 @@ async function refreshDictStatus() {
     } catch (err) { console.warn('[vox] fn_key_status failed:', err) }
   }
   accEl.style.display = accOk ? 'none' : ''
+  // Light re-check every 2 s while the warning is up, so it clears by itself
+  // once the grant lands (no need to reopen the window).
+  clearTimeout(accPoll)
+  if (!accOk) accPoll = setTimeout(refreshDictStatus, 2000)
   fnEl.style.display = fnOk ? 'none' : ''
 }
 window.addEventListener('focus', () => refreshDictStatus())
 document.getElementById('warn-acc-btn').addEventListener('click', async () => {
   try { await invoke('request_accessibility') } catch (err) { console.warn('[vox] request_accessibility failed:', err) }
   refreshDictStatus()
+})
+document.getElementById('warn-acc-open').addEventListener('click', () => {
+  invoke('open_url', { url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility' })
+    .catch((err) => console.warn('[vox] open_url failed:', err))
 })
 document.getElementById('warn-fn-btn').addEventListener('click', () => {
   invoke('open_url', { url: 'x-apple.systempreferences:com.apple.Keyboard-Settings.extension' })

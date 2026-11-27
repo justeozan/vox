@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixed
+- **Dictation no longer reports "Accessibility not granted" when it is.** The
+  check now combines `AXIsProcessTrusted` with a non-intrusive event-tap probe
+  (the former can lag behind a fresh grant), dictation never reopens the system
+  prompt (only the *Allow* button does), the settings warning re-checks every 2 s
+  and explains how to repair a stale entry (remove/re-add Vox), with a button
+  that opens the Accessibility pane.
+
 ### Added
 - **Settings in their own window (⌘,).** The pill is now a small 240×40 bar with no
   gear and no settings panel; the recap button appears on hover. ⌘, (app menu)
