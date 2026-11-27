@@ -30,6 +30,8 @@ const SHOW_AFTER: Duration = Duration::from_millis(140);
 const MIN_AUDIO: Duration = Duration::from_millis(250);
 /// The formatter is a nicety: past this, paste the raw transcript.
 const FORMAT_TIMEOUT: Duration = Duration::from_secs(12);
+/// Editing a selection needs the model: give it more room than the formatter.
+const EDIT_TIMEOUT: Duration = Duration::from_secs(20);
 /// Amical's value: long enough for the target app to read the pasteboard.
 const CLIPBOARD_RESTORE_DELAY: Duration = Duration::from_millis(700);
 
@@ -40,6 +42,10 @@ pub struct Context {
     pub url: Option<String>,
     pub before: Option<String>,
     pub after: Option<String>,
+    /// Non-empty selected text (edit mode); never read from secure fields.
+    pub selected: Option<String>,
+    /// A selection exists but is too long to edit: never dictate over it.
+    pub selection_too_long: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -284,6 +290,22 @@ fn process(app: &AppHandle, state: &Arc<AppState>, samples: &[f32]) {
         return done(app, false, "", Some(msg("Didn't catch anything.", "Je n'ai rien entendu.")));
     }
 
+    if ctx.selection_too_long {
+        // Pasting the dictated instruction would overwrite the selection.
+        return done(
+            app,
+            false,
+            "",
+            Some(msg(
+                "Selection too long to edit — left unchanged.",
+                "Sélection trop longue pour être modifiée — rien n'a changé.",
+            )),
+        );
+    }
+    if is_edit_mode(&ctx) {
+        return edit_selection(app, state, &raw, &ctx, fr);
+    }
+
     let use_llm = state.settings.lock().unwrap().dictation_format == "llm";
     let formatted = if use_llm { format_with_llm(state, &raw, &ctx, &terms, fr) } else { None };
     let was_formatted = formatted.is_some();
@@ -313,6 +335,43 @@ fn process(app: &AppHandle, state: &Arc<AppState>, samples: &[f32]) {
     }
     paste(app, &text);
     done(app, true, text.trim(), None);
+}
+
+/// A non-blank selection turns the dictation into a voice command on it.
+fn is_edit_mode(ctx: &Context) -> bool {
+    ctx.selected.as_deref().is_some_and(|s| !s.trim().is_empty())
+}
+
+/// Voice command on the selection: the transcript is an instruction, the LLM
+/// returns the edited text, ⌘V replaces the selection. Never pastes on doubt.
+fn edit_selection(app: &AppHandle, state: &Arc<AppState>, instruction: &str, ctx: &Context, fr: bool) {
+    let msg = |en: &str, fr_msg: &str| if fr { fr_msg.to_string() } else { en.to_string() };
+    let selection = ctx.selected.clone().unwrap_or_default();
+    let system = dt::build_edit_system(fr);
+    let user = dt::edit_user(&selection, instruction);
+    let model = state.settings.lock().unwrap().model.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(crate::llm::chat_once(&model, &system, &user, 4000));
+    });
+    let failed = || {
+        msg(
+            "Couldn't edit the selection — left unchanged.",
+            "Modification impossible — la sélection n'a pas changé.",
+        )
+    };
+    let out = rx.recv_timeout(EDIT_TIMEOUT).ok().flatten();
+    let Some(edited) = dt::finish_edit(&selection, out.as_deref()) else {
+        return done(app, false, "", Some(failed()));
+    };
+    println!("[vox] dictation edit → {:?} ({} → {} chars)", ctx.app_name, selection.len(), edited.len());
+    append_history(ctx, instruction, &edited, true);
+    if delivery_for(accessibility_trusted(false)) == Delivery::ClipboardOnly {
+        set_clipboard_text(&edited);
+        return done(app, false, &edited, Some(msg(DENIED_MSG.1, DENIED_MSG.0)));
+    }
+    paste(app, &edited);
+    done(app, true, edited.trim(), None);
 }
 
 fn format_with_llm(state: &Arc<AppState>, raw: &str, ctx: &Context, vocab: &[String], fr: bool) -> Option<String> {
@@ -412,6 +471,17 @@ mod trust_tests {
     #[test]
     fn both_failing_is_untrusted() {
         assert_eq!(resolve_trust(false, || false), (false, Some(false)));
+    }
+
+    #[test]
+    fn edit_mode_needs_a_non_blank_selection() {
+        let mut c = Context::default();
+        assert!(!is_edit_mode(&c));
+        c.selected = Some("  \n".into());
+        assert!(!is_edit_mode(&c));
+        c.selected = Some("bonjour".into());
+        assert!(is_edit_mode(&c));
+        assert!(!c.selection_too_long);
     }
 
     #[test]
@@ -895,6 +965,8 @@ mod mac {
             let post = &units[end..(end + CONTEXT_UNITS).min(units.len())];
             ctx.before = Some(String::from_utf16_lossy(pre));
             ctx.after = Some(String::from_utf16_lossy(post));
+            ctx.selected = crate::dictation_text::selection_text(&units, start, len);
+            ctx.selection_too_long = len > crate::dictation_text::MAX_SELECTION_UNITS;
         }
         ctx
     }
