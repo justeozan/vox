@@ -6,7 +6,9 @@
     "dev": "tauri dev --no-watch",
     "build": "tauri build",
     "tauri": "tauri",
-    "dev:watch": "tauri dev"
+    "dev:watch": "tauri dev",
+    "test:release": "node --test scripts/release.test.mjs",
+    "release:check": "node scripts/release.mjs check"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

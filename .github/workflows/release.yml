@@ -39,6 +39,18 @@ jobs:
         with:
           node-version: 20
 
+      # A tag that disagrees with the version files would ship a mislabelled build.
+      - name: Check the version matches the tag
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            node scripts/release.mjs check --tag "${GITHUB_REF_NAME}"
+          else
+            node scripts/release.mjs check
+          fi
+
+      - name: Release notes from the changelog
+        run: node scripts/release.mjs notes "$(node -p "require('./package.json').version")" > "${RUNNER_TEMP}/notes.md"
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -83,6 +95,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: ${{ runner.temp }}/notes.md
           files: |
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/macos/Vox.app.zip

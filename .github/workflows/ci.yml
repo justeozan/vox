@@ -16,6 +16,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Release tooling and version consistency
+        run: |
+          node --test scripts/release.test.mjs
+          node scripts/release.mjs check
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:

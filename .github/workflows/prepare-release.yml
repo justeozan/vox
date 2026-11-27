@@ -1,0 +1,60 @@
+name: prepare-release
+
+# Manual: bumps the version everywhere, releases the CHANGELOG's "Unreleased" section,
+# commits to main, tags v<version> and starts the `release` workflow (signed, notarised build
+# and GitHub Release whose notes are that changelog section).
+# Needs a main branch that github-actions[bot] may push to (or a RELEASE_TOKEN secret, a PAT
+# allowed to bypass protection).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (X.Y.Z, without the v)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency: prepare-release
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Bump, check and test
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          node --test scripts/release.test.mjs
+          node scripts/release.mjs bump "${VERSION}"
+          node scripts/release.mjs check --tag "v${VERSION}"
+
+      - name: Commit, tag and push
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: release v${VERSION}"
+          git tag "v${VERSION}"
+          git push origin main "v${VERSION}"
+
+      # A tag pushed with the default token does not trigger other workflows: start it explicitly.
+      - name: Start the release build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: gh workflow run release.yml --ref "v${VERSION}"
